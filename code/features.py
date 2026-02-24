@@ -235,7 +235,6 @@ class Loudness(torch.nn.Module):
         loudness = -0.691 + 10.0 * torch.log10(loudness + self.epsilon)
         return loudness
 
-
 class SpectralCentroid(torch.nn.Module):
     """
     Spectral centroid of a signal.
