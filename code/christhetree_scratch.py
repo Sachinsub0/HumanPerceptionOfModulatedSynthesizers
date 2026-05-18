@@ -6,7 +6,6 @@ import numpy as np
 import pyloudnorm as pyln
 import torch as tr
 import torchaudio
-from numpy import dtype
 from torch import Tensor as T
 
 from features import Loudness, SpectralCentroid, SpectralFlatness
@@ -89,7 +88,7 @@ def plot_wt(wt: T, name: str) -> None:
     centroid = centroid_metric(wt)
     flatness = flatness_metric(wt)
 
-    plt.figure(figsize=(12,4))
+    plt.figure(figsize=(12, 4))
 
     plt.subplot(1, 3, 1)
     plt.plot(loudness.cpu().numpy())
@@ -148,7 +147,7 @@ if __name__ == "__main__":
     # log.info(f"wt_normed.shape: {wt_normed.shape}")
     # log.info(f"wt_normed.abs().max(): {wt_normed.abs().max()}")
 
-    chunked_sweep = sweep[:chunked_n_pos * wt_samples]
+    chunked_sweep = sweep[: chunked_n_pos * wt_samples]
     chunked_sweep = chunked_sweep.view(-1, wt_samples)
     log.info(f"chunked sweep shape: {chunked_sweep.shape}")
 

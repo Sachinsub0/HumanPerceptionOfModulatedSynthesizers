@@ -3,9 +3,14 @@ name = "mod_perception"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
+    "auraloss>=0.4.0",
+    "black>=26.5.0",
+    "hypy-utils>=1.0.29",
     "jupyterlab>=4.5.7",
     "matplotlib>=3.10.9",
+    "msclap>=1.3.4",
     "pyloudnorm>=0.2.0",
+    "scipy<1.17.0",
     "soundfile>=0.13.1",
     "torch>=2.12.0",
     "torchaudio>=2.11.0",
