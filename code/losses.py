@@ -3,6 +3,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Union, Optional, List, Literal
 
+import auraloss
 import scipy
 import torch as tr
 import torch.nn as nn
@@ -409,23 +410,22 @@ class MFCCDistance(nn.Module):
 
 
 if __name__ == "__main__":
+    sr = 8192
     audio = tr.randn(3, 1, 32768)
     audio_target = tr.randn(3, 1, 32768)
-    # panns = PANNsEmbeddingLoss(variant="cnn14-16k", in_sr=8192)
-    panns = PANNsEmbeddingLoss(variant="cnn14-32k", in_sr=8192)
-    # panns = PANNsEmbeddingLoss(variant="wavegram-logmel", in_sr=8192)
-    # emb = panns.get_embedding(audio)
-    # log.info(f"emb.shape = {emb.shape}")
 
-    loss_fn = panns
-    loss = panns.forward(audio, audio_target)
+    loss_fn = auraloss.time.ESRLoss()
+    # loss_fn = auraloss.freq.MelSTFTLoss(sample_rate=sr)
+    # loss_fn = auraloss.freq.MultiResolutionSTFTLoss(sample_rate=sr)
+    # loss_fn = LogMSSLoss()
+    # loss_fn = MFCCDistance(sr=sr)
+    # loss_fn = Scat1DLoss(shape=32768, J=3, Q1=2, Q2=2)
+    # loss_fn = JTFSTLoss(shape=32768, J=3, Q1=2, Q2=2, J_fr=3, Q_fr=2)
+
+    # loss_fn = ClapEmbeddingLoss(use_cuda=False, in_sr=sr)
+    # loss_fn = PANNsEmbeddingLoss(variant="cnn14-16k", in_sr=sr)
+    # loss_fn = PANNsEmbeddingLoss(variant="cnn14-32k", in_sr=sr)
+    # loss_fn = PANNsEmbeddingLoss(variant="wavegram-logmel", in_sr=sr)
+
+    loss = loss_fn.forward(audio, audio_target)
     log.info(f"loss = {loss}")
-
-    # mss = LogMSSLoss()
-    # mss(audio, audio_target)
-    exit()
-
-    # w2v2_loss = Wav2Vec2Loss()
-    # x = tr.randn(3, 1, 4000) * 3.0
-    # w2v2_loss.get_embedding(x)
-    # exit()
