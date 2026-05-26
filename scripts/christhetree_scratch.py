@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pyloudnorm as pyln
 import torch as tr
+import torchaudio
 from torch import Tensor as T
 
 from features import Loudness, SpectralCentroid, SpectralFlatness
@@ -299,6 +300,144 @@ def plot_correlation_matrix(
     plt.close()
 
 
+def create_synthetic_wavetable(
+    n_pos: int = 256,
+    n_samples: int = 1024,
+    centroids: np.ndarray = None,
+    sigmas: np.ndarray = None,
+    warmths: np.ndarray = None,
+    centroid_correction: bool = False,
+    seed: int = 42,
+) -> T:
+    """
+    Create a synthetic wavetable by constructing each frame in the
+    frequency domain with a Gaussian spectral envelope.
+
+    Per-position arrays control which parameter sweeps and which stays fixed:
+    - centroids: Gaussian center per position (FFT bin index)
+    - sigmas: Gaussian width per position (bins)
+    - warmths: odd-to-total power ratio per position
+
+    Each frame:
+    1. Gaussian envelope at (centroids[p], sigmas[p]) sets spectral shape.
+    2. Even harmonics are rescaled to enforce warmths[p].
+    3. Fixed random phases (seeded) are shared across all positions.
+    4. Peak-normalized to [-1, 1].
+
+    centroid_correction: if True, iteratively shifts the Gaussian center
+        to compensate for asymmetric clipping at bin 0.
+    """
+    n_bins = n_samples // 2 + 1
+    bins = np.arange(n_bins, dtype=np.float64)
+
+    if centroids is None:
+        centroids = np.full(n_pos, 40.0)
+    if sigmas is None:
+        sigmas = np.full(n_pos, 20.0)
+    if warmths is None:
+        warmths = np.full(n_pos, 0.5)
+
+    rng = np.random.RandomState(seed)
+    phases = rng.uniform(0, 2 * np.pi, n_bins)
+    phases[0] = 0.0
+
+    odd_mask = np.zeros(n_bins, dtype=bool)
+    even_mask = np.zeros(n_bins, dtype=bool)
+    odd_mask[1::2] = True
+    even_mask[2::2] = True
+
+    frames = np.zeros((n_pos, n_samples))
+    for p in range(n_pos):
+        center = centroids[p]
+        if centroid_correction:
+            for _ in range(10):
+                envelope = np.exp(-0.5 * ((bins - center) / sigmas[p]) ** 2)
+                envelope[0] = 0.0
+                power = envelope ** 2
+                actual = (bins * power).sum() / (power.sum() + 1e-12)
+                center += centroids[p] - actual
+        envelope = np.exp(-0.5 * ((bins - center) / sigmas[p]) ** 2)
+        envelope[0] = 0.0
+
+        odd_power = (envelope[odd_mask] ** 2).sum()
+        even_power = (envelope[even_mask] ** 2).sum()
+
+        # Scale even harmonics to enforce warmth:
+        # warmth = odd / (odd + s^2 * even) = w  =>  s = sqrt(odd*(1-w) / (w*even))
+        w = warmths[p]
+        if even_power > 0 and odd_power > 0:
+            even_scale = np.sqrt(odd_power * (1 - w) / (w * even_power))
+        else:
+            even_scale = 1.0
+        amplitudes = envelope.copy()
+        amplitudes[even_mask] *= even_scale
+
+        spectrum = amplitudes * np.exp(1j * phases)
+        frame = np.fft.irfft(spectrum, n=n_samples)
+
+        peak = np.abs(frame).max()
+        if peak > 0:
+            frame /= peak
+        frames[p] = frame
+
+    return tr.from_numpy(frames).float()
+
+
+def create_synthetic_centroid_sweep(
+    n_pos: int = 256,
+    n_samples: int = 1024,
+    centroid_range: Tuple[float, float] = (10.0, 110.0),
+    sigma: float = 10.0,
+    target_warmth: float = 0.5,
+    seed: int = 42,
+) -> T:
+    return create_synthetic_wavetable(
+        n_pos=n_pos,
+        n_samples=n_samples,
+        centroids=np.geomspace(centroid_range[0], centroid_range[1], n_pos),
+        sigmas=np.full(n_pos, sigma),
+        warmths=np.full(n_pos, target_warmth),
+        seed=seed,
+    )
+
+
+def create_synthetic_warmth_sweep(
+    n_pos: int = 256,
+    n_samples: int = 1024,
+    target_centroid: float = 40.0,
+    sigma: float = 20.0,
+    warmth_range: Tuple[float, float] = (0.001, 0.999),
+    seed: int = 42,
+) -> T:
+    return create_synthetic_wavetable(
+        n_pos=n_pos,
+        n_samples=n_samples,
+        centroids=np.full(n_pos, target_centroid),
+        sigmas=np.full(n_pos, sigma),
+        warmths=np.linspace(warmth_range[0], warmth_range[1], n_pos),
+        seed=seed,
+    )
+
+
+def create_synthetic_richness_sweep(
+    n_pos: int = 256,
+    n_samples: int = 1024,
+    target_centroid: float = 40.0,
+    sigma_range: Tuple[float, float] = (2.0, 40.0),
+    target_warmth: float = 0.5,
+    seed: int = 42,
+) -> T:
+    return create_synthetic_wavetable(
+        n_pos=n_pos,
+        n_samples=n_samples,
+        centroids=np.full(n_pos, target_centroid),
+        sigmas=np.geomspace(sigma_range[0], sigma_range[1], n_pos),
+        warmths=np.full(n_pos, target_warmth),
+        centroid_correction=True,
+        seed=seed,
+    )
+
+
 if __name__ == "__main__":
     wt_dir = "../data/ableton/"
     save_dir = "../out/"
@@ -381,16 +520,41 @@ if __name__ == "__main__":
     #     range_metric="Richness",
     #     low_corr_metrics=["Warmth", "Spectral Centroid"],
     # )
-    rank_wavetables_by_range(
-        all_features,
-        wt_names,
-        # high_range_metric="Spectral Centroid",
-        # low_range_metrics=["Warmth", "Richness"],
-        # high_range_metric="Warmth",
-        # low_range_metrics=["Spectral Centroid", "Richness"],
-        high_range_metric="Richness",
-        low_range_metrics=["Warmth", "Spectral Centroid"],
-    )
+    # rank_wavetables_by_range(
+    #     all_features,
+    #     wt_names,
+    #     # high_range_metric="Spectral Centroid",
+    #     # low_range_metrics=["Warmth", "Richness"],
+    #     # high_range_metric="Warmth",
+    #     # low_range_metrics=["Spectral Centroid", "Richness"],
+    #     high_range_metric="Richness",
+    #     low_range_metrics=["Warmth", "Spectral Centroid"],
+    # )
+
+    z_stats: Dict[str, Tuple[float, float]] = {}
+    for feat_name in FEATURE_NAMES:
+        concat = np.concatenate(all_features[feat_name])
+        z_stats[feat_name] = (float(concat.mean()), float(concat.std()))
+
+    synth_sweeps = [
+        ("synthetic_centroid_sweep", create_synthetic_centroid_sweep()),
+        ("synthetic_warmth_sweep", create_synthetic_warmth_sweep()),
+        ("synthetic_richness_sweep", create_synthetic_richness_sweep()),
+    ]
+    for synth_name, synth_wt in synth_sweeps:
+        synth_features = compute_features(synth_wt, sr, max_n_pos)
+        plot_wt(synth_features, synth_name, save_dir)
+        plot_wt(synth_features, synth_name, save_dir, z_stats=z_stats)
+
+        sweep = create_wavetable_sweep(synth_wt, sr=sr, duration=sweep_dur_sec)
+        sweep_normed, loudness, gain = loudness_normalize(
+            sweep, sr, target_lufs=target_lufs
+        )
+        log.info(f"{synth_name} loudness: {loudness:.1f} LUFS, gain: {gain:.1f} dB")
+        sweep_t = tr.from_numpy(sweep_normed).float()
+        wav_path = os.path.join(save_dir, f"{synth_name}_{target_lufs}lufs.wav")
+        torchaudio.save(wav_path, sweep_t.unsqueeze(0), sr)
+        log.info(f"Saved: {wav_path}")
 
 
 # INFO:__main__:Ranking by: high Spectral Centroid z-range, low z-range in ['Warmth', 'Richness']
