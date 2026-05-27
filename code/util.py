@@ -1,7 +1,9 @@
 import logging
 import os
-from typing import Dict, Tuple, Iterator, Union, Any, List
+from typing import Dict, List, Iterator, Optional, Tuple, Union, Any
 
+import numpy as np
+import pyloudnorm as pyln
 import torch as tr
 import torch.nn.functional as F
 from scipy.stats import loguniform
@@ -92,3 +94,79 @@ def sample_log_uniform(low: float, high: float, n: int = 1) -> Union[float, T]:
     if n == 1:
         return float(x)
     return tr.from_numpy(x)
+
+
+def create_wavetable_sweep(
+    wt: T,
+    sr: int = 44100,
+    duration: float = 4.0,
+    mod_signal: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    Render audio by sweeping through wavetable frames.
+
+    wt: tensor [num_frames, frame_length]
+    sr: sample rate
+    duration: output duration in seconds
+    mod_signal: optional modulation signal of length total_samples, values
+        in [0, 1] mapped to [0, num_frames-1]. If None, a linear sweep is used.
+    """
+    wt = wt.detach().cpu().numpy()
+
+    num_frames, frame_len = wt.shape
+    total_samples = int(sr * duration)
+
+    if mod_signal is None:
+        frame_positions = np.linspace(0, num_frames - 1, total_samples)
+    else:
+        frame_positions = np.clip(mod_signal, 0.0, 1.0) * (num_frames - 1)
+
+    output = np.zeros(total_samples)
+
+    for i, pos in enumerate(frame_positions):
+        idx_low = int(np.floor(pos))
+        idx_high = min(idx_low + 1, num_frames - 1)
+        frac = pos - idx_low
+
+        # Linear interpolation between frames
+        frame = (1 - frac) * wt[idx_low] + frac * wt[idx_high]
+
+        # Wrap inside frame length
+        sample_index = i % frame_len
+        output[i] = frame[sample_index]
+
+    # Normalize to avoid clipping
+    # output /= np.max(np.abs(output) + 1e-8)
+    if np.abs(output).max() > 1.0:
+        log.warning("wavetable sweep is clipping")
+
+    return output
+
+
+def loudness_normalize(
+    audio: np.ndarray, sr: int, target_lufs: float = -16
+) -> Tuple[np.ndarray, float, float]:
+    """
+    Normalize audio to target LUFS.
+
+    audio: numpy array
+    sr: sample rate
+    target_lufs: desired loudness (e.g. -16, -14, -12)
+    """
+
+    meter = pyln.Meter(sr)  # ITU-R BS.1770
+
+    loudness = meter.integrated_loudness(audio)
+
+    # Compute gain
+    gain = target_lufs - loudness
+
+    # Apply gain
+    normalized_audio = pyln.normalize.loudness(audio, loudness, target_lufs)
+
+    # Optional: clipping protection
+    # peak = np.max(np.abs(normalized_audio))
+    # if peak > 1.0:
+    #     normalized_audio = normalized_audio / peak
+
+    return normalized_audio, loudness, gain

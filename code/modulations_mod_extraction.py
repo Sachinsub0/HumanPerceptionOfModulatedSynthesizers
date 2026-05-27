@@ -1,7 +1,7 @@
 # TODO(cm): refactor file, the logic is difficult to follow in a lot of these methods
 import logging
 import os
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch as tr
 from torch import Tensor as T
@@ -128,13 +128,12 @@ def _time_stretch_section(
 
 def make_quasi_periodic(
     mod_sig: T,
-    l_min: float = 0.2,
-    l_max: float = 0.2,
-    r_min: float = 0.2,
-    r_max: float = 0.2,
-    lr_split: float = 0.5,
-) -> T:
+    randomness: float = 0.2,
+    seed: Optional[int] = None,
+) -> Tuple[T, List[float]]:
     assert mod_sig.ndim == 1
+    orig_size = mod_sig.size(0)
+
     top_corners, bottom_corners = find_corners(mod_sig.unsqueeze(0))
     if top_corners.sum() > bottom_corners.sum():
         corners = top_corners
@@ -144,34 +143,46 @@ def make_quasi_periodic(
     corner_indices = (corners == 1).nonzero(as_tuple=True)[0]
     corner_indices = [c.item() for c in corner_indices]
     if len(corner_indices) < 2:
-        return mod_sig
+        return mod_sig, []
 
-    prev_idx = 0
+    boundaries = [0] + corner_indices + [orig_size - 1]
+    gaps = [boundaries[i + 1] - boundaries[i] for i in range(len(boundaries) - 1)]
+
+    gen = tr.Generator()
+    if seed is not None:
+        gen.manual_seed(seed)
+    n_gaps = len(gaps)
+    assert n_gaps % 2 == 0
+    half = n_gaps // 2
+    scales = [1.0 + randomness] * half + [1.0 - randomness] * half
+    perm = tr.randperm(n_gaps, generator=gen).tolist()
+    scales = [scales[p] for p in perm]
+    scaled_gaps = [g * s for g, s in zip(gaps, scales)]
+    total_scaled = sum(scaled_gaps)
+    total_orig = sum(gaps)
+    norm_gaps = [g / total_scaled for g in scaled_gaps]
+
+    new_boundaries = [0]
+    for g in norm_gaps:
+        new_boundaries.append(new_boundaries[-1] + g * total_orig)
+    new_boundaries = [int(round(b)) for b in new_boundaries]
+    new_boundaries[-1] = orig_size - 1
+
     sections = []
-    sections_len = 0
-    for idx in corner_indices:
-        section = mod_sig[prev_idx : idx + 1]
-        new_section = _time_stretch_section(
-            section, l_min, l_max, r_min, r_max, lr_split
+    for i in range(len(boundaries) - 1):
+        old_start, old_end = boundaries[i], boundaries[i + 1]
+        section = mod_sig[old_start : old_end + 1]
+        new_len = new_boundaries[i + 1] - new_boundaries[i] + 1
+        new_section = util.linear_interpolate_last_dim(
+            section, max(2, new_len), align_corners=True
         )
-        new_section = new_section[:-1]
-        sections_len += new_section.size(0)
+        if i < len(boundaries) - 2:
+            new_section = new_section[:-1]
         sections.append(new_section)
-        prev_idx = idx
-
-    orig_size = mod_sig.size(0)
-    section = mod_sig[prev_idx:orig_size]
-    sections_len += section.size(0)
-    if sections_len < orig_size:
-        new_size = section.size(0) + (orig_size - sections_len)
-        section = util.linear_interpolate_last_dim(
-            section, new_size, align_corners=True
-        )
-    sections.append(section)
 
     new_mod_sig = tr.cat(sections, dim=0)
     new_mod_sig = new_mod_sig[:orig_size]
-    return new_mod_sig
+    return new_mod_sig, norm_gaps
 
 
 def make_concave_convex_mod_sig(
@@ -387,3 +398,36 @@ def smoothen(x: T, smooth_n_frames: int) -> T:
         x = x.unfold(dimension=-1, size=smooth_n_frames, step=1)
         x = tr.mean(x, dim=-1, keepdim=False)
     return x
+
+
+if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+
+    sr = 44100
+    dur_sec = 4.0
+    freq = 1.0
+    seed = 42
+
+    n_samples = int(sr * dur_sec)
+
+    mod_sig = make_mod_signal(n_samples, sr, freq, shape="cos")
+    randomness_vals = [0.0, 0.125, 0.25, 0.375, 0.5]
+    # randomness_vals = [0.0, 0.2, 0.4, 0.6, 0.8]
+
+    fig, axes = plt.subplots(len(randomness_vals), 1, figsize=(12, 10), sharex=True)
+    for idx, (ax, r) in enumerate(zip(axes, randomness_vals)):
+        quasi, norm_gaps = make_quasi_periodic(mod_sig, randomness=r, seed=seed)
+        print(f"r={r:.2f} intervals: {[f'{g:.2f}' for g in norm_gaps]}")
+        ax.plot(quasi.numpy())
+        ax.axvline(0, color="r", linestyle="--", alpha=0.5)
+        x_pos = 0
+        for g in norm_gaps[:-1]:
+            x_pos += g * n_samples
+            ax.axvline(x_pos, color="r", linestyle="--", alpha=0.5)
+        ax.set_ylabel(f"r={r:.2f}")
+        ax.set_ylim(-0.1, 1.1)
+    axes[-1].set_xlabel("Sample")
+    axes[0].set_title("Periodic to quasi-periodic (1 Hz cosine, 4 cycles)")
+    plt.tight_layout()
+    # plt.savefig("../out/quasi_periodic_sweep.png", dpi=150)
+    plt.show()

@@ -5,13 +5,12 @@ from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pyloudnorm as pyln
 import torch as tr
 import torchaudio
 from torch import Tensor as T
 
 from features import Loudness, SpectralCentroid, SpectralFlatness
-from util import linear_interpolate_last_dim
+from util import linear_interpolate_last_dim, create_wavetable_sweep, loudness_normalize
 
 logging.basicConfig()
 log = logging.getLogger(__name__)
@@ -31,70 +30,6 @@ FEATURE_YLABELS = [
     "Warmth",
     "Richness",
 ]
-
-
-def create_wavetable_sweep(wt: T, sr: int = 44100, duration: float = 3.0) -> np.ndarray:
-    """
-    Creates a linear sweep through wavetable frames.
-    wt: tensor [num_frames, frame_length]
-    """
-    wt = wt.detach().cpu().numpy()
-
-    num_frames, frame_len = wt.shape
-    total_samples = int(sr * duration)
-
-    # Continuous frame position (0 → num_frames-1)
-    frame_positions = np.linspace(0, num_frames - 1, total_samples)
-
-    output = np.zeros(total_samples)
-
-    for i, pos in enumerate(frame_positions):
-        idx_low = int(np.floor(pos))
-        idx_high = min(idx_low + 1, num_frames - 1)
-        frac = pos - idx_low
-
-        # Linear interpolation between frames
-        frame = (1 - frac) * wt[idx_low] + frac * wt[idx_high]
-
-        # Wrap inside frame length
-        sample_index = i % frame_len
-        output[i] = frame[sample_index]
-
-    # Normalize to avoid clipping
-    # output /= np.max(np.abs(output) + 1e-8)
-    if np.abs(output).max() > 1.0:
-        log.warning("wavetable sweep is clipping")
-
-    return output
-
-
-def loudness_normalize(
-    audio: np.ndarray, sr: int, target_lufs: float = -16
-) -> Tuple[np.ndarray, float, float]:
-    """
-    Normalize audio to target LUFS.
-
-    audio: numpy array
-    sr: sample rate
-    target_lufs: desired loudness (e.g. -16, -14, -12)
-    """
-
-    meter = pyln.Meter(sr)  # ITU-R BS.1770
-
-    loudness = meter.integrated_loudness(audio)
-
-    # Compute gain
-    gain = target_lufs - loudness
-
-    # Apply gain
-    normalized_audio = pyln.normalize.loudness(audio, loudness, target_lufs)
-
-    # Optional: clipping protection
-    # peak = np.max(np.abs(normalized_audio))
-    # if peak > 1.0:
-    #     normalized_audio = normalized_audio / peak
-
-    return normalized_audio, loudness, gain
 
 
 def compute_warmth_curve(frame_batch: T, eps: float = 1e-8) -> T:
@@ -443,7 +378,7 @@ if __name__ == "__main__":
     save_dir = "../out/"
     sr = 44100
     sweep_dur_sec = 4.0
-    target_lufs = -16
+    target_lufs = -18
     wt_samples = 1024
     max_n_pos = 256
 
@@ -536,25 +471,57 @@ if __name__ == "__main__":
         concat = np.concatenate(all_features[feat_name])
         z_stats[feat_name] = (float(concat.mean()), float(concat.std()))
 
-    synth_sweeps = [
-        ("synthetic_centroid_sweep", create_synthetic_centroid_sweep()),
-        ("synthetic_warmth_sweep", create_synthetic_warmth_sweep()),
-        ("synthetic_richness_sweep", create_synthetic_richness_sweep()),
-    ]
-    for synth_name, synth_wt in synth_sweeps:
-        synth_features = compute_features(synth_wt, sr, max_n_pos)
-        plot_wt(synth_features, synth_name, save_dir)
-        plot_wt(synth_features, synth_name, save_dir, z_stats=z_stats)
+    new_wt_dir = "../data/listening_test/"
+    new_wt_paths = sorted(glob.glob(os.path.join(new_wt_dir, "*.pt")))
+    log.info(f"Found {len(new_wt_paths)} wavetables in {new_wt_dir}")
 
-        sweep = create_wavetable_sweep(synth_wt, sr=sr, duration=sweep_dur_sec)
-        sweep_normed, loudness, gain = loudness_normalize(
+    for wt_path in new_wt_paths:
+        wt_name = os.path.splitext(os.path.basename(wt_path))[0]
+        wt = tr.load(wt_path, weights_only=True)
+        log.info(f"wt_name: {wt_name}, wt.shape: {wt.shape}")
+
+        features = compute_features(wt, sr, max_n_pos)
+
+        plot_wt(features, wt_name, save_dir)
+        plot_wt(features, wt_name, save_dir, z_stats=z_stats)
+        plot_correlation_matrix(
+            [features[name].cpu().numpy() for name in FEATURE_NAMES],
+            wt_name,
+            save_dir,
+        )
+
+        sweep = create_wavetable_sweep(wt, sr=sr, duration=sweep_dur_sec)
+        sweep_norm, loudness, gain = loudness_normalize(
             sweep, sr, target_lufs=target_lufs
         )
-        log.info(f"{synth_name} loudness: {loudness:.1f} LUFS, gain: {gain:.1f} dB")
-        sweep_t = tr.from_numpy(sweep_normed).float()
-        wav_path = os.path.join(save_dir, f"{synth_name}_{target_lufs}lufs.wav")
-        torchaudio.save(wav_path, sweep_t.unsqueeze(0), sr)
+        log.info(f"{wt_name} loudness: {loudness:.1f} LUFS, gain: {gain:.1f} dB")
+        wav_path = os.path.join(save_dir, f"{wt_name}_{target_lufs}lufs.wav")
+        torchaudio.save(wav_path, tr.from_numpy(sweep_norm).unsqueeze(0).float(), sr)
         log.info(f"Saved: {wav_path}")
+
+    # synth_sweeps = [
+    #     ("synthetic_centroid_sweep", create_synthetic_centroid_sweep()),
+    #     ("synthetic_warmth_sweep", create_synthetic_warmth_sweep()),
+    #     ("synthetic_richness_sweep", create_synthetic_richness_sweep()),
+    # ]
+    # for synth_name, synth_wt in synth_sweeps:
+    #     pt_path = os.path.join(save_dir, f"{synth_name}__256_1024.pt")
+    #     tr.save(synth_wt, pt_path)
+    #     log.info(f"Saved: {pt_path}")
+    #
+    #     synth_features = compute_features(synth_wt, sr, max_n_pos)
+    #     plot_wt(synth_features, synth_name, save_dir)
+    #     plot_wt(synth_features, synth_name, save_dir, z_stats=z_stats)
+    #
+    #     sweep = create_wavetable_sweep(synth_wt, sr=sr, duration=sweep_dur_sec)
+    #     sweep_normed, loudness, gain = loudness_normalize(
+    #         sweep, sr, target_lufs=target_lufs
+    #     )
+    #     log.info(f"{synth_name} loudness: {loudness:.1f} LUFS, gain: {gain:.1f} dB")
+    #     sweep_t = tr.from_numpy(sweep_normed).float()
+    #     wav_path = os.path.join(save_dir, f"{synth_name}_{target_lufs}lufs.wav")
+    #     torchaudio.save(wav_path, sweep_t.unsqueeze(0), sr)
+    #     log.info(f"Saved: {wav_path}")
 
 
 # INFO:__main__:Ranking by: high Spectral Centroid z-range, low z-range in ['Warmth', 'Richness']
@@ -582,8 +549,6 @@ if __name__ == "__main__":
 # INFO:__main__:   10. basics__quad_saw__119_1024                score=1.9477  range=4.3141  |corr(Warmth)|=0.2448  |corr(Richness)|=0.8523
 
 
-
-
 # INFO:__main__:Ranking by: high Warmth z-range, low z-range in ['Spectral Centroid', 'Richness']
 # INFO:__main__:    1. basics__pulse_dual__256_1024              score=+2.96  Warmth: z_range=+1.85 z_min=-1.11 z_max=+0.85  |  Spectral Centroid: z_range=-1.02 z_min=+1.05 z_max=+0.36  |  Richness: z_range=-1.20 z_min=+1.22 z_max=+0.17
 # INFO:__main__:    2. vintage__logue_saw__166_1024              score=+2.82  Warmth: z_range=+1.88 z_min=-1.13 z_max=+0.87  |  Spectral Centroid: z_range=-0.70 z_min=+0.91 z_max=+0.54  |  Richness: z_range=-1.16 z_min=+1.26 z_max=+0.25
@@ -607,8 +572,6 @@ if __name__ == "__main__":
 # INFO:__main__:    8. retro__harmonics_3__185_1024              score=0.6726  range=0.7554  |corr(Spectral Centroid)|=0.1141  |corr(Richness)|=0.1051
 # INFO:__main__:    9. vintage__jx10_sync__127_1024              score=0.6684  range=0.8475  |corr(Spectral Centroid)|=0.2384  |corr(Richness)|=0.1844
 # INFO:__main__:   10. distortion__phased__178_1024              score=0.6468  range=0.7494  |corr(Spectral Centroid)|=0.2215  |corr(Richness)|=0.0523
-
-
 
 
 # INFO:__main__:Ranking by: high Richness z-range, low z-range in ['Warmth', 'Spectral Centroid']
