@@ -9,6 +9,8 @@ import torch as tr
 import torchaudio
 from torch import Tensor as T
 
+from sklearn.isotonic import IsotonicRegression
+
 from features import Loudness, SpectralCentroid, SpectralFlatness
 from util import linear_interpolate_last_dim, create_wavetable_sweep, loudness_normalize
 
@@ -73,20 +75,52 @@ def compute_features(wt: T, sr: int, max_n_pos: int) -> Dict[str, T]:
     )
     flatness_metric = SpectralFlatness()
 
+    raw_curves = {
+        "Loudness": loudness_metric(wt),
+        "Spectral Centroid": centroid_metric(wt),
+        "Spectral Flatness": flatness_metric(wt),
+        "Warmth": compute_warmth_curve(wt),
+        "Richness": compute_richness_curve(wt),
+    }
+
     features = {}
-    features["Loudness"] = linear_interpolate_last_dim(loudness_metric(wt), max_n_pos)
-    features["Spectral Centroid"] = linear_interpolate_last_dim(
-        centroid_metric(wt), max_n_pos
-    )
-    features["Spectral Flatness"] = linear_interpolate_last_dim(
-        flatness_metric(wt), max_n_pos
-    )
-    features["Warmth"] = linear_interpolate_last_dim(
-        compute_warmth_curve(wt), max_n_pos
-    )
-    features["Richness"] = linear_interpolate_last_dim(
-        compute_richness_curve(wt), max_n_pos
-    )
+    for name, curve in raw_curves.items():
+        n = curve.shape[0]
+        curve_np = curve.detach().cpu().numpy()
+        # Compute consecutive differences to check if curve is already monotonically non-decreasing
+        diffs = curve_np[1:] - curve_np[:-1]
+        if (diffs >= 0).all():
+            # Curve is already monotonic, use it directly
+            mono_curve = curve_np
+        else:
+            # Fit isotonic regression to get the closest monotonically non-decreasing approximation
+            ir = IsotonicRegression(increasing=True)
+            mono_curve = ir.fit_transform(np.arange(n), curve_np)
+        # Create n equally spaced target values spanning the monotonic curve's full range
+        targets = np.linspace(mono_curve[0], mono_curve[-1], n)
+        # Invert the monotonic curve: for each target value, find the frame position where it occurs
+        positions = np.interp(targets, mono_curve, np.arange(n))
+        # Normalize positions to [0, 1] to get a LUT that warps time so the feature progresses linearly
+        lut = positions / (n - 1)
+
+        # warped_positions = np.interp(np.linspace(0, 1, n), np.linspace(0, 1, n), lut) * (n - 1)
+        # corrected_curve = np.interp(warped_positions, np.arange(n), curve_np)
+        # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+        # ax1.plot(curve_np, label="original")
+        # ax1.plot(mono_curve, label="monotonic", linestyle="--")
+        # ax1.plot(corrected_curve, label="corrected")
+        # ax1.set_title(f"{name}")
+        # ax1.legend()
+        # ax2.plot(np.linspace(0, 1, n), label="linear")
+        # ax2.plot(lut, label="lut")
+        # ax2.set_title(f"{name} LUT")
+        # ax2.legend()
+        # plt.tight_layout()
+        # plt.show()
+
+        features[f"{name}_lut"] = tr.from_numpy(lut).float()
+        features[name] = linear_interpolate_last_dim(curve, max_n_pos)
+
     return features
 
 
@@ -111,6 +145,7 @@ def plot_wt(
         plt.ylabel(ylabel)
     plt.suptitle(f"{name}")
     plt.tight_layout()
+    # plt.show()
     if save_dir:
         suffix = "_features__z" if z_stats is not None else "_features"
         plt.savefig(os.path.join(save_dir, f"{name}{suffix}.png"), dpi=150)
@@ -188,8 +223,7 @@ def rank_wavetables_by_range(
         z_lows = np.array([z[m]["range"][i] for m in low_range_metrics])
         score = z_high - z_lows.mean()
         per_metric = {
-            m: {stat: float(z[m][stat][i]) for stat in stats}
-            for m in all_metrics
+            m: {stat: float(z[m][stat][i]) for stat in stats} for m in all_metrics
         }
         results.append((wt_names[i], float(score), per_metric))
 
@@ -288,7 +322,7 @@ def create_synthetic_wavetable(
             for _ in range(10):
                 envelope = np.exp(-0.5 * ((bins - center) / sigmas[p]) ** 2)
                 envelope[0] = 0.0
-                power = envelope ** 2
+                power = envelope**2
                 actual = (bins * power).sum() / (power.sum() + 1e-12)
                 center += centroids[p] - actual
         envelope = np.exp(-0.5 * ((bins - center) / sigmas[p]) ** 2)
@@ -318,11 +352,16 @@ def create_synthetic_wavetable(
     return tr.from_numpy(frames).float()
 
 
+# wt_name: brightness_real__harmonics__synced_sines__256_1024, wt.shape: torch.Size([256, 1024])
+# INFO:__main__:  Loudness: min=-9.5253, max=-7.5477, diff=1.9776, mean=-8.3617
+# INFO:__main__:  Spectral Centroid: min=6.0971, max=9.4243, diff=3.3272, mean=7.1975
+# INFO:__main__:  Warmth: min=0.3878, max=0.7087, diff=0.3209, mean=0.5163
+# INFO:__main__:  Richness: min=0.1314, max=0.1632, diff=0.0318, mean=0.1556
 def create_synthetic_centroid_sweep(
     n_pos: int = 256,
     n_samples: int = 1024,
-    centroid_range: Tuple[float, float] = (10.0, 110.0),
-    sigma: float = 10.0,
+    centroid_range: Tuple[float, float] = (0.4, 16.5),
+    sigma: float = 2.5,
     target_warmth: float = 0.5,
     seed: int = 42,
 ) -> T:
@@ -336,11 +375,16 @@ def create_synthetic_centroid_sweep(
     )
 
 
+# wt_name: warmth_real__vintage__logue_saw__166_1024, wt.shape: torch.Size([166, 1024])
+# INFO:__main__:  Loudness: min=-9.3308, max=-8.1255, diff=1.2053, mean=-8.8276
+# INFO:__main__:  Spectral Centroid: min=11.7265, max=12.5748, diff=0.8484, mean=12.3346
+# INFO:__main__:  Warmth: min=0.0003, max=0.9999, diff=0.9995, mean=0.6399
+# INFO:__main__:  Richness: min=0.5274, max=0.5764, diff=0.0490, mean=0.5459
 def create_synthetic_warmth_sweep(
     n_pos: int = 256,
     n_samples: int = 1024,
-    target_centroid: float = 40.0,
-    sigma: float = 20.0,
+    target_centroid: float = 36.0,
+    sigma: float = 80.0,
     warmth_range: Tuple[float, float] = (0.001, 0.999),
     seed: int = 42,
 ) -> T:
@@ -354,11 +398,16 @@ def create_synthetic_warmth_sweep(
     )
 
 
+# wt_name: richness_real__filter__acid_saw__46_1024__inverted, wt.shape: torch.Size([46, 1024])
+# INFO:__main__:  Loudness: min=-19.1486, max=-13.6826, diff=5.4660, mean=-16.0458
+# INFO:__main__:  Spectral Centroid: min=5.6809, max=6.4232, diff=0.7423, mean=6.0519
+# INFO:__main__:  Warmth: min=0.4840, max=0.5050, diff=0.0210, mean=0.4967
+# INFO:__main__:  Richness: min=0.1520, max=0.3964, diff=0.2443, mean=0.2731
 def create_synthetic_richness_sweep(
     n_pos: int = 256,
     n_samples: int = 1024,
-    target_centroid: float = 40.0,
-    sigma_range: Tuple[float, float] = (2.0, 40.0),
+    target_centroid: float = 11.3,
+    sigma_range: Tuple[float, float] = (1.0, 9.8),
     target_warmth: float = 0.5,
     seed: int = 42,
 ) -> T:
@@ -389,6 +438,7 @@ if __name__ == "__main__":
     wt_names: List[str] = []
 
     for wt_path in wt_paths:
+    # for wt_path in []:
         wt_name = os.path.splitext(os.path.basename(wt_path))[0]
         wt_names.append(wt_name)
         wt = tr.load(wt_path)
@@ -475,12 +525,19 @@ if __name__ == "__main__":
     new_wt_paths = sorted(glob.glob(os.path.join(new_wt_dir, "*.pt")))
     log.info(f"Found {len(new_wt_paths)} wavetables in {new_wt_dir}")
 
+    # new_wt_paths = []
     for wt_path in new_wt_paths:
         wt_name = os.path.splitext(os.path.basename(wt_path))[0]
         wt = tr.load(wt_path, weights_only=True)
         log.info(f"wt_name: {wt_name}, wt.shape: {wt.shape}")
 
         features = compute_features(wt, sr, max_n_pos)
+        for feat_name in FEATURE_NAMES:
+            vals = features[feat_name]
+            log.info(
+                f"  {feat_name}: min={vals.min():.4f}, max={vals.max():.4f}, "
+                f"diff={vals.max() - vals.min():.4f}, mean={vals.mean():.4f}"
+            )
 
         plot_wt(features, wt_name, save_dir)
         plot_wt(features, wt_name, save_dir, z_stats=z_stats)
@@ -490,38 +547,89 @@ if __name__ == "__main__":
             save_dir,
         )
 
-        sweep = create_wavetable_sweep(wt, sr=sr, duration=sweep_dur_sec)
+        for feat_name in FEATURE_NAMES:
+            lut = features[f"{feat_name}_lut"].cpu().numpy()
+            lut_path = os.path.join(save_dir, f"{wt_name}_{feat_name}_lut.npy")
+            np.save(lut_path, lut)
+            log.info(f"Saved LUT: {lut_path}")
+
+        # ====================== LUT experiments ======================
+        total_samples = int(sr * sweep_dur_sec)
+        # lut = features["Spectral Centroid_lut"].cpu().numpy()
+        # # lut = features["Warmth_lut"].cpu().numpy()
+        # # lut = features["Richness_lut"].cpu().numpy()
+        # log.info(f"lut.shape = {lut.shape}")
+        # linear_mod = np.linspace(0, 1, total_samples)
+        # # linear_mod = 0.5 * (
+        # #     1 - np.cos(2 * np.pi * 4 * np.arange(total_samples) / total_samples)
+        # # )
+        #
+        warped_mod = None
+        # warped_mod = np.interp(linear_mod, np.linspace(0, 1, len(lut)), lut)
+        # # warped_mod = linear_mod
+        #
+        # plt.figure()
+        # plt.plot(linear_mod, label="linear")
+        # plt.plot(warped_mod, label="warped")
+        # plt.title(f"{wt_name} warped mod")
+        # plt.legend()
+        # plt.show()
+        #
+        sweep = create_wavetable_sweep(
+            wt, sr=sr, duration=sweep_dur_sec, mod_signal=warped_mod
+        )
         sweep_norm, loudness, gain = loudness_normalize(
             sweep, sr, target_lufs=target_lufs
         )
         log.info(f"{wt_name} loudness: {loudness:.1f} LUFS, gain: {gain:.1f} dB")
+        #
+        # for overlap in [0.0]:
+        #     hop_size = int(wt_samples * (1 - overlap))
+        #     chunked_sweep_sw = (
+        #         tr.from_numpy(sweep_norm).float().unfold(0, wt_samples, hop_size)
+        #     )
+        #     log.info(
+        #         f"chunked sweep (overlap={overlap:.0%}) shape: {chunked_sweep_sw.shape}"
+        #     )
+        #     chunked_features = compute_features(chunked_sweep_sw, sr, max_n_pos)
+        #     plot_wt(
+        #         chunked_features,
+        #         f"{wt_name} - chunked sweep (overlap={overlap:.0%})",
+        #     )
+        #
         wav_path = os.path.join(save_dir, f"{wt_name}_{target_lufs}lufs.wav")
         torchaudio.save(wav_path, tr.from_numpy(sweep_norm).unsqueeze(0).float(), sr)
         log.info(f"Saved: {wav_path}")
 
-    # synth_sweeps = [
-    #     ("synthetic_centroid_sweep", create_synthetic_centroid_sweep()),
-    #     ("synthetic_warmth_sweep", create_synthetic_warmth_sweep()),
-    #     ("synthetic_richness_sweep", create_synthetic_richness_sweep()),
-    # ]
-    # for synth_name, synth_wt in synth_sweeps:
-    #     pt_path = os.path.join(save_dir, f"{synth_name}__256_1024.pt")
-    #     tr.save(synth_wt, pt_path)
-    #     log.info(f"Saved: {pt_path}")
-    #
-    #     synth_features = compute_features(synth_wt, sr, max_n_pos)
-    #     plot_wt(synth_features, synth_name, save_dir)
-    #     plot_wt(synth_features, synth_name, save_dir, z_stats=z_stats)
-    #
-    #     sweep = create_wavetable_sweep(synth_wt, sr=sr, duration=sweep_dur_sec)
-    #     sweep_normed, loudness, gain = loudness_normalize(
-    #         sweep, sr, target_lufs=target_lufs
-    #     )
-    #     log.info(f"{synth_name} loudness: {loudness:.1f} LUFS, gain: {gain:.1f} dB")
-    #     sweep_t = tr.from_numpy(sweep_normed).float()
-    #     wav_path = os.path.join(save_dir, f"{synth_name}_{target_lufs}lufs.wav")
-    #     torchaudio.save(wav_path, sweep_t.unsqueeze(0), sr)
-    #     log.info(f"Saved: {wav_path}")
+    synth_sweeps = [
+        # ("synthetic_centroid_sweep", create_synthetic_centroid_sweep()),
+        # ("synthetic_warmth_sweep", create_synthetic_warmth_sweep()),
+        # ("synthetic_richness_sweep", create_synthetic_richness_sweep()),
+    ]
+    for synth_name, synth_wt in synth_sweeps:
+        pt_path = os.path.join(save_dir, f"{synth_name}__256_1024.pt")
+        tr.save(synth_wt, pt_path)
+        log.info(f"Saved: {pt_path}")
+
+        synth_features = compute_features(synth_wt, sr, max_n_pos)
+        for feat_name in FEATURE_NAMES:
+            vals = synth_features[feat_name]
+            log.info(
+                f"  {feat_name}: min={vals.min():.4f}, max={vals.max():.4f}, diff={vals.max() - vals.min():.4f}, mean={vals.mean():.4f}"
+            )
+
+        plot_wt(synth_features, synth_name, save_dir)
+        # plot_wt(synth_features, synth_name, save_dir, z_stats=z_stats)
+
+        sweep = create_wavetable_sweep(synth_wt, sr=sr, duration=sweep_dur_sec)
+        sweep_normed, loudness, gain = loudness_normalize(
+            sweep, sr, target_lufs=target_lufs
+        )
+        log.info(f"{synth_name} loudness: {loudness:.1f} LUFS, gain: {gain:.1f} dB")
+        sweep_t = tr.from_numpy(sweep_normed).float()
+        wav_path = os.path.join(save_dir, f"{synth_name}_{target_lufs}lufs.wav")
+        torchaudio.save(wav_path, sweep_t.unsqueeze(0), sr)
+        log.info(f"Saved: {wav_path}")
 
 
 # INFO:__main__:Ranking by: high Spectral Centroid z-range, low z-range in ['Warmth', 'Richness']

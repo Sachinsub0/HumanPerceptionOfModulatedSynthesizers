@@ -20,7 +20,7 @@ if __name__ == "__main__":
     sr = 44100
     sweep_dur_sec = 4.0
     target_lufs = -18
-    fade_samples = 32
+    fade_samples = 256
 
     # freq_vals = []
     freq_vals = [0.25, 0.5, 1.0, 2.0, 4.0]
@@ -47,12 +47,17 @@ if __name__ == "__main__":
     for wt_path in wt_paths:
         wt_name = os.path.splitext(os.path.basename(wt_path))[0]
         wt = tr.load(wt_path, weights_only=True)
-        log.info(f"Processing wavetable: {wt_name} (shape={wt.shape})")
+        lut_path = os.path.join(wavetable_dir, f"{wt_name}__lut.npy")
+        lut = np.load(lut_path)
+        log.info(f"Processing wavetable: {wt_name} (shape={wt.shape}, lut={lut.shape})")
 
         for freq in freq_vals:
             mod_sig = make_mod_signal(n_samples, sr, freq, shape="cos")
+            mod_sig_warped = np.interp(
+                mod_sig.numpy(), np.linspace(0, 1, len(lut)), lut
+            )
             sweep = create_wavetable_sweep(
-                wt, sr=sr, duration=sweep_dur_sec, mod_signal=mod_sig.numpy()
+                wt, sr=sr, duration=sweep_dur_sec, mod_signal=mod_sig_warped
             )
             sweep_norm, loudness, gain = loudness_normalize(sweep, sr, target_lufs)
 
@@ -69,17 +74,28 @@ if __name__ == "__main__":
             log.info(f"Saved {save_name} (loudness={loudness:.1f}, gain={gain:.1f}dB)")
 
         for reg in amp_vals:
-            mod_sig = make_mod_signal(n_samples, sr, amp_freq, shape="cos", phase=tr.pi / 2)
+            mod_sig = make_mod_signal(
+                n_samples, sr, amp_freq, shape="cos", phase=tr.pi / 2
+            )
             mod_sig = amp_center_val + (mod_sig - 0.5) * reg
-            log.info(f"amp={reg:.2f} mod_sig min={mod_sig.min():.4f} max={mod_sig.max():.4f} mean={mod_sig.mean():.4f}")
+            log.info(
+                f"amp={reg:.2f} mod_sig min={mod_sig.min():.4f} max={mod_sig.max():.4f} mean={mod_sig.mean():.4f}"
+            )
+            mod_sig_warped = np.interp(
+                mod_sig.numpy(), np.linspace(0, 1, len(lut)), lut
+            )
 
-            sweep = create_wavetable_sweep(wt, sr=sr, duration=sweep_dur_sec, mod_signal=mod_sig.numpy())
+            sweep = create_wavetable_sweep(
+                wt, sr=sr, duration=sweep_dur_sec, mod_signal=mod_sig_warped
+            )
             sweep_norm, loudness, gain = loudness_normalize(sweep, sr, target_lufs)
 
             sweep_norm[:fade_samples] *= fade_in
             sweep_norm[-fade_samples:] *= fade_out
 
-            save_name = f"{wt_name}__amp_{amp_freq:.2f}hz_{reg:.2f}_{target_lufs}lufs.wav"
+            save_name = (
+                f"{wt_name}__amp_{amp_freq:.2f}hz_{reg:.2f}_{target_lufs}lufs.wav"
+            )
             save_path = os.path.join(save_dir, save_name)
             torchaudio.save(
                 save_path,
@@ -90,16 +106,25 @@ if __name__ == "__main__":
 
         for reg in reg_vals:
             mod_sig = make_mod_signal(n_samples, sr, reg_freq, shape="cos")
-            mod_sig, norm_gaps = make_quasi_periodic(mod_sig, randomness=reg, seed=reg_seed)
+            mod_sig, norm_gaps = make_quasi_periodic(
+                mod_sig, randomness=reg, seed=reg_seed
+            )
             print(f"r={reg:.2f} intervals: {[f'{g:.2f}' for g in norm_gaps]}")
+            mod_sig_warped = np.interp(
+                mod_sig.numpy(), np.linspace(0, 1, len(lut)), lut
+            )
 
-            sweep = create_wavetable_sweep(wt, sr=sr, duration=sweep_dur_sec, mod_signal=mod_sig.numpy())
+            sweep = create_wavetable_sweep(
+                wt, sr=sr, duration=sweep_dur_sec, mod_signal=mod_sig_warped
+            )
             sweep_norm, loudness, gain = loudness_normalize(sweep, sr, target_lufs)
 
             sweep_norm[:fade_samples] *= fade_in
             sweep_norm[-fade_samples:] *= fade_out
 
-            save_name = f"{wt_name}__reg_{reg_freq:.2f}hz_{reg:.3f}_{target_lufs}lufs.wav"
+            save_name = (
+                f"{wt_name}__reg_{reg_freq:.2f}hz_{reg:.3f}_{target_lufs}lufs.wav"
+            )
             save_path = os.path.join(save_dir, save_name)
             torchaudio.save(
                 save_path,
