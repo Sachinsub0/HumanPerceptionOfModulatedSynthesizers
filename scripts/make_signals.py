@@ -48,14 +48,25 @@ if __name__ == "__main__":
         wt_name = os.path.splitext(os.path.basename(wt_path))[0]
         wt = tr.load(wt_path, weights_only=True)
         lut_path = os.path.join(wavetable_dir, f"{wt_name}__lut.npy")
-        lut = np.load(lut_path)
-        log.info(f"Processing wavetable: {wt_name} (shape={wt.shape}, lut={lut.shape})")
+        if os.path.exists(lut_path):
+            lut = np.load(lut_path)
+            log.info(
+                f"Processing wavetable: {wt_name} (shape={wt.shape}, lut={lut.shape})"
+            )
+        else:
+            lut = None
+            log.warning(
+                f"No LUT file found at {lut_path}, skipping warping for {wt_name}"
+            )
 
         for freq in freq_vals:
             mod_sig = make_mod_signal(n_samples, sr, freq, shape="cos")
-            mod_sig_warped = np.interp(
-                mod_sig.numpy(), np.linspace(0, 1, len(lut)), lut
-            )
+            if lut is not None:
+                mod_sig_warped = np.interp(
+                    mod_sig.numpy(), np.linspace(0, 1, len(lut)), lut
+                )
+            else:
+                mod_sig_warped = mod_sig.numpy()
             sweep = create_wavetable_sweep(
                 wt, sr=sr, duration=sweep_dur_sec, mod_signal=mod_sig_warped
             )
@@ -68,7 +79,7 @@ if __name__ == "__main__":
             save_path = os.path.join(save_dir, save_name)
             torchaudio.save(
                 save_path,
-                tr.tensor(sweep_norm).unsqueeze(0).float(),
+                tr.tensor(sweep_norm).unsqueeze(0).expand(2, -1).float(),
                 sr,
             )
             log.info(f"Saved {save_name} (loudness={loudness:.1f}, gain={gain:.1f}dB)")
@@ -81,9 +92,12 @@ if __name__ == "__main__":
             log.info(
                 f"amp={reg:.2f} mod_sig min={mod_sig.min():.4f} max={mod_sig.max():.4f} mean={mod_sig.mean():.4f}"
             )
-            mod_sig_warped = np.interp(
-                mod_sig.numpy(), np.linspace(0, 1, len(lut)), lut
-            )
+            if lut is not None:
+                mod_sig_warped = np.interp(
+                    mod_sig.numpy(), np.linspace(0, 1, len(lut)), lut
+                )
+            else:
+                mod_sig_warped = mod_sig.numpy()
 
             sweep = create_wavetable_sweep(
                 wt, sr=sr, duration=sweep_dur_sec, mod_signal=mod_sig_warped
@@ -99,7 +113,7 @@ if __name__ == "__main__":
             save_path = os.path.join(save_dir, save_name)
             torchaudio.save(
                 save_path,
-                tr.tensor(sweep_norm).unsqueeze(0).float(),
+                tr.tensor(sweep_norm).unsqueeze(0).expand(2, -1).float(),
                 sr,
             )
             log.info(f"Saved {save_name} (loudness={loudness:.1f}, gain={gain:.1f}dB)")
@@ -110,9 +124,12 @@ if __name__ == "__main__":
                 mod_sig, randomness=reg, seed=reg_seed
             )
             print(f"r={reg:.2f} intervals: {[f'{g:.2f}' for g in norm_gaps]}")
-            mod_sig_warped = np.interp(
-                mod_sig.numpy(), np.linspace(0, 1, len(lut)), lut
-            )
+            if lut is not None:
+                mod_sig_warped = np.interp(
+                    mod_sig.numpy(), np.linspace(0, 1, len(lut)), lut
+                )
+            else:
+                mod_sig_warped = mod_sig.numpy()
 
             sweep = create_wavetable_sweep(
                 wt, sr=sr, duration=sweep_dur_sec, mod_signal=mod_sig_warped
@@ -128,7 +145,7 @@ if __name__ == "__main__":
             save_path = os.path.join(save_dir, save_name)
             torchaudio.save(
                 save_path,
-                tr.tensor(sweep_norm).unsqueeze(0).float(),
+                tr.tensor(sweep_norm).unsqueeze(0).expand(2, -1).float(),
                 sr,
             )
             log.info(f"Saved {save_name} (loudness={loudness:.1f}, gain={gain:.1f}dB)")
