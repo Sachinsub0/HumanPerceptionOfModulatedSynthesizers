@@ -116,6 +116,7 @@ class PANNsModel(ModelLoader):
             state_dict = torch.load(
                 f"{current_file_dir}/panns/ckpt/Cnn14_16k_mAP=0.438.pth",
                 map_location="cpu",
+                weights_only=False,
             )
             self.model.load_state_dict(state_dict["model"])
 
@@ -136,7 +137,9 @@ class PANNsModel(ModelLoader):
                     os.path.join(ckpt_dir, "Cnn14_mAP=0.431.pth"),
                 )
             state_dict = torch.load(
-                f"{current_file_dir}/panns/ckpt/Cnn14_mAP=0.431.pth", map_location="cpu"
+                f"{current_file_dir}/panns/ckpt/Cnn14_mAP=0.431.pth",
+                map_location="cpu",
+                weights_only=False,
             )
             self.model.load_state_dict(state_dict["model"])
 
@@ -160,6 +163,7 @@ class PANNsModel(ModelLoader):
             state_dict = torch.load(
                 f"{current_file_dir}/panns/ckpt/Wavegram_Logmel_Cnn14_mAP=0.439.pth",
                 map_location="cpu",
+                weights_only=False,
             )
             self.model.load_state_dict(state_dict["model"])
 
