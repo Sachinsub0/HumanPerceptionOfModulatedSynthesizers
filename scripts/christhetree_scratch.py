@@ -33,6 +33,20 @@ FEATURE_YLABELS = [
     "Richness",
 ]
 
+SERIES_COLOR = "#2a78d6"
+AXIS_COLOR = "#52514e"
+
+# The listening test wavetables, one row per wavetable in this order
+LT_DIMS = ["warmth", "brightness", "richness"]
+LT_VARIANTS = ["synthetic", "real"]
+# Columns of the listening test overview: the wavetable and three of its curves
+LT_FEATURES = ["Warmth", "Spectral Centroid", "Richness"]
+LT_COL_TITLES = ["Wavetable", "Warmth", "Brightness", "Richness"]
+LT_FIG_SIZE = (8.0, 10.5)
+LT_DPI = 300
+LT_FONT_SIZE = 12
+LT_TICK_FONT_SIZE = 10
+
 
 def compute_warmth_curve(frame_batch: T, eps: float = 1e-8) -> T:
     """
@@ -150,6 +164,118 @@ def plot_wt(
         suffix = "_features__z" if z_stats is not None else "_features"
         plt.savefig(os.path.join(save_dir, f"{name}{suffix}.png"), dpi=150)
     plt.close()
+
+
+def plot_listening_test_wavetables(
+    wt_dir: str,
+    sr: int,
+    max_n_pos: int,
+    save_dir: str = "",
+    fig_size: Tuple[float, float] = LT_FIG_SIZE,
+    dpi: int = LT_DPI,
+) -> List[Tuple[str, Dict[str, Tuple[float, float]]]]:
+    """One row per listening test wavetable, showing the wavetable itself
+    followed by the curves of the three timbral dimensions. Returns the range
+    of each of those curves, per wavetable."""
+    rows = []
+    for dim in LT_DIMS:
+        for variant in LT_VARIANTS:
+            paths = sorted(glob.glob(os.path.join(wt_dir, f"{dim}_{variant}*.pt")))
+            assert len(paths) == 1, f"Expected one {dim} {variant} wt, found {paths}"
+            rows.append((f"{dim.capitalize()} ({variant.capitalize()})", paths[0]))
+
+    fig, axs = plt.subplots(
+        len(rows),
+        len(LT_COL_TITLES),
+        figsize=fig_size,
+        sharex="all",
+        sharey="col",
+        squeeze=False,
+        layout="constrained",
+    )
+    ranges = []
+    for row_idx, (row_name, wt_path) in enumerate(rows):
+        wt = tr.load(wt_path, weights_only=True)
+        log.info(f"{row_name}: {os.path.basename(wt_path)}, wt.shape: {wt.shape}")
+        features = compute_features(wt, sr, max_n_pos)
+        ranges.append(
+            (
+                row_name,
+                {
+                    feat_name: (
+                        float(features[feat_name].min()),
+                        float(features[feat_name].max()),
+                    )
+                    for feat_name in LT_FEATURES
+                },
+            )
+        )
+
+        wt_np = wt.detach().cpu().numpy()
+        peak = np.abs(wt_np).max()
+        ax = axs[row_idx][0]
+        # Frames along x so that every plot in the row shares the position axis
+        ax.imshow(
+            wt_np.T,
+            aspect="auto",
+            origin="lower",
+            extent=(0.0, 1.0, 0.0, 1.0),
+            cmap="coolwarm",
+            vmin=-peak,
+            vmax=peak,
+        )
+        # Two lines so the label fits the height of a square plot
+        ax.set_ylabel(row_name.replace(" (", "\n("), fontsize=LT_FONT_SIZE)
+        # The y axis of a wavetable plot is the phase within each frame
+        ax.set_yticks([])
+
+        for col_idx, feat_name in enumerate(LT_FEATURES, start=1):
+            vals = features[feat_name].cpu().numpy()
+            pos = np.linspace(0.0, 1.0, len(vals))
+            ax = axs[row_idx][col_idx]
+            ax.plot(pos, vals, color=SERIES_COLOR, linewidth=1.5)
+            ax.grid(True, color=AXIS_COLOR, alpha=0.15, linewidth=0.8)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+
+    for ax in axs.flat:
+        ax.set_box_aspect(1.0)  # Square plotting area, not a square figure
+        ax.set_xlim(0.0, 1.0)
+        ax.set_xticks([0.0, 0.5, 1.0])
+        ax.tick_params(labelsize=LT_TICK_FONT_SIZE)
+    for col_idx, title in enumerate(LT_COL_TITLES):
+        axs[0][col_idx].set_title(title, fontsize=LT_FONT_SIZE)
+    fig.supxlabel("Wavetable position", fontsize=LT_FONT_SIZE)
+    fig.get_layout_engine().set(w_pad=0.02, h_pad=0.02, wspace=0.02, hspace=0.02)
+    # plt.show()
+    if save_dir:
+        save_name = "listening_test_wavetables.png"
+        plt.savefig(os.path.join(save_dir, save_name), dpi=dpi)
+        log.info(f"Saved {save_name} ({len(rows)} wavetables, {dpi} dpi)")
+    plt.close(fig)
+    return ranges
+
+
+def print_feature_ranges(
+    ranges: List[Tuple[str, Dict[str, Tuple[float, float]]]],
+) -> None:
+    """Print a table of the range of each timbre feature, per wavetable."""
+    name_w = max(len(name) for name, _ in ranges)
+    header = f"{'Wavetable':<{name_w}}" + "".join(
+        f"  {title:^17}" for title in LT_COL_TITLES[1:]
+    )
+    subheader = f"{'':<{name_w}}" + "".join(
+        f"  {'min':>8}{'max':>9}" for _ in LT_FEATURES
+    )
+    print(header.rstrip())
+    print(subheader.rstrip())
+    print("-" * len(header))
+    for name, feat_ranges in ranges:
+        row = f"{name:<{name_w}}"
+        for feat_name in LT_FEATURES:
+            lo, hi = feat_ranges[feat_name]
+            row += f"  {lo:>8.3f}{hi:>9.3f}"
+        print(row)
 
 
 def rank_wavetables(
@@ -600,6 +726,9 @@ if __name__ == "__main__":
         wav_path = os.path.join(save_dir, f"{wt_name}_{target_lufs}lufs.wav")
         torchaudio.save(wav_path, tr.from_numpy(sweep_norm).unsqueeze(0).float(), sr)
         log.info(f"Saved: {wav_path}")
+
+    lt_ranges = plot_listening_test_wavetables(new_wt_dir, sr, max_n_pos, save_dir)
+    print_feature_ranges(lt_ranges)
 
     synth_sweeps = [
         # ("synthetic_centroid_sweep", create_synthetic_centroid_sweep()),
