@@ -1,5 +1,7 @@
+import glob
 import logging
 import os
+import re
 from typing import Dict, List, Iterator, Optional, Tuple, Union, Any
 
 import numpy as np
@@ -44,6 +46,34 @@ class ReadOnlyTensorDict(nn.Module):
     def items(self) -> Iterator[Tuple[str | int, T]]:
         for k in self.keys:
             yield k, self[k]
+
+
+def parse_amount(mod_sig: str) -> Tuple[str, float, str]:
+    """Split a mod signal name around its last number, which is the amount, e.g.
+    "amp_1.00hz_0.10" -> ("amp_1.00hz_", 0.10, "") and
+    "freq_0.25hz" -> ("freq_", 0.25, "hz")."""
+    match = re.match(r"^(.*?)(\d+(?:\.\d+)?)(\D*)$", mod_sig)
+    assert match is not None, f"Could not find an amount in {mod_sig}"
+    return match.group(1), float(match.group(2)), match.group(3)
+
+
+def find_variants(
+    samples_dir: str, wt_name: str, mod_sig: str, suffix: str
+) -> List[str]:
+    """Find all samples of wt_name whose mod signal matches mod_sig apart from
+    its amount, including mod_sig itself so that the trivial self distance is
+    also measured (not every distance function is guaranteed to return 0)."""
+    prefix, _, unit = parse_amount(mod_sig)
+    pattern = os.path.join(samples_dir, f"{wt_name}__{prefix}*{unit}{suffix}")
+    paths = []
+    for path in sorted(glob.glob(pattern)):
+        name = os.path.basename(path)[: -len(suffix)]
+        variant = name[len(f"{wt_name}__") :]
+        variant_prefix, _, variant_unit = parse_amount(variant)
+        if (variant_prefix, variant_unit) != (prefix, unit):
+            continue
+        paths.append(path)
+    return paths
 
 
 def linear_interpolate_last_dim(x: T, n: int, align_corners: bool = True) -> T:

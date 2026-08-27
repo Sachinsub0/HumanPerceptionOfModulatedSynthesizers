@@ -1,7 +1,5 @@
-import glob
 import logging
 import os
-import re
 from typing import List, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
@@ -13,6 +11,7 @@ from auraloss.freq import MultiResolutionSTFTLoss
 from torch import Tensor as T
 from torch import nn
 
+from util import find_variants, parse_amount
 from losses import (
     MFCCDistance,
     PANNsEmbeddingLoss,
@@ -40,34 +39,6 @@ MOD_SIG_LOG_X = {"freq"}
 MAX_NAMED_GROUP_SIZE = 3
 FIG_SIZE = (6, 6)
 DPI = 150
-
-
-def parse_amount(mod_sig: str) -> Tuple[str, float, str]:
-    """Split a mod signal name around its last number, which is the amount, e.g.
-    "amp_1.00hz_0.10" -> ("amp_1.00hz_", 0.10, "") and
-    "freq_0.25hz" -> ("freq_", 0.25, "hz")."""
-    match = re.match(r"^(.*?)(\d+(?:\.\d+)?)(\D*)$", mod_sig)
-    assert match is not None, f"Could not find an amount in {mod_sig}"
-    return match.group(1), float(match.group(2)), match.group(3)
-
-
-def find_variants(
-    samples_dir: str, wt_name: str, mod_sig: str, suffix: str
-) -> List[str]:
-    """Find all samples of wt_name whose mod signal matches mod_sig apart from
-    its amount, including mod_sig itself so that the trivial self distance is
-    also measured (not every distance function is guaranteed to return 0)."""
-    prefix, _, unit = parse_amount(mod_sig)
-    pattern = os.path.join(samples_dir, f"{wt_name}__{prefix}*{unit}{suffix}")
-    paths = []
-    for path in sorted(glob.glob(pattern)):
-        name = os.path.basename(path)[: -len(suffix)]
-        variant = name[len(f"{wt_name}__") :]
-        variant_prefix, _, variant_unit = parse_amount(variant)
-        if (variant_prefix, variant_unit) != (prefix, unit):
-            continue
-        paths.append(path)
-    return paths
 
 
 def load_audio(path: str, sr: int) -> T:
@@ -215,8 +186,8 @@ if __name__ == "__main__":
     max_shift = 2048  # Two wavetable frames (44100 / 1024 Hz carrier)
     shift_seed = 42
     loss_fns = [
-        # ("mse", nn.MSELoss()),
-        # ("mss", MultiResolutionSTFTLoss()),
+        ("mse", nn.MSELoss()),
+        ("mss", MultiResolutionSTFTLoss()),
         # (
         #     "mss_rev",
         #     LogMSSLoss(
@@ -237,7 +208,7 @@ if __name__ == "__main__":
         #     PANNsEmbeddingLoss(variant="wavegram-logmel", in_sr=sr),
         # ),
         # ("scat1d", Scat1DLoss(shape=176400, J=12, Q1=8, Q2=2, T=None, max_order=2, p=2)),
-        ("jtfs", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=3, Q_fr=2, T=None, F=None, format_="joint", p=2)),
+        # ("jtfs", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=3, Q_fr=2, T=None, F=None, format_="joint", p=2)),
     ]
     wavetables = [
         # "brightness_real__harmonics__synced_sines__256_1024",
