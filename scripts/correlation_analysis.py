@@ -30,7 +30,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Literal, Sequence, Union
+from typing import Literal, Sequence, Union, Optional
 
 import numpy as np
 import pandas as pd
@@ -225,11 +225,17 @@ def _compute_slice_correlations(
         "kendall_group": float(kr_g),
         "kendall_group_p": float(p_val_kr),
         "pearson_indiv": float(np.mean(indiv_p)) if indiv_p else float("nan"),
-        "pearson_indiv_std": float(np.std(indiv_p, ddof=1)) if has_indiv else float("nan"),
+        "pearson_indiv_std": (
+            float(np.std(indiv_p, ddof=1)) if has_indiv else float("nan")
+        ),
         "spearman_indiv": float(np.mean(indiv_s)) if indiv_s else float("nan"),
-        "spearman_indiv_std": float(np.std(indiv_s, ddof=1)) if has_indiv else float("nan"),
+        "spearman_indiv_std": (
+            float(np.std(indiv_s, ddof=1)) if has_indiv else float("nan")
+        ),
         "kendall_indiv": float(np.mean(indiv_k)) if indiv_k else float("nan"),
-        "kendall_indiv_std": float(np.std(indiv_k, ddof=1)) if has_indiv else float("nan"),
+        "kendall_indiv_std": (
+            float(np.std(indiv_k, ddof=1)) if has_indiv else float("nan")
+        ),
     }
 
 
@@ -242,6 +248,8 @@ def compute_correlations(
     exclude_reference: bool = True,
     include_noise_ceiling: bool = False,
     show_progress: bool = True,
+    sort_by: Optional[str] = "pearson_group",
+    ascending: bool = False,
 ) -> pd.DataFrame:
     """Compute correlations between audio loss functions and human perceptual ratings.
 
@@ -254,6 +262,8 @@ def compute_correlations(
         exclude_reference: Exclude reference stimulus rating (default: True).
         include_noise_ceiling: Compute and append noise ceiling benchmark columns from noise_ceiling.py.
         show_progress: Display tqdm progress bar.
+        sort_by: Column to sort loss functions by within each granularity + condition group (default: 'pearson_group').
+        ascending: Sort in ascending order instead of descending (default: False).
 
     Returns:
         pd.DataFrame containing full correlation results.
@@ -385,12 +395,35 @@ def compute_correlations(
         "n_subjects",
     ]
     other_cols = [c for c in result_df.columns if c not in first_cols]
-    return result_df[first_cols + other_cols]
+    result_df = result_df[first_cols + other_cols]
+
+    if sort_by is not None and str(sort_by).lower() != "none" and not result_df.empty:
+        col_map = {c.lower(): c for c in result_df.columns}
+        if str(sort_by).lower() not in col_map:
+            raise ValueError(
+                f"Cannot sort by '{sort_by}'. Available columns: {list(result_df.columns)}"
+            )
+        matched_sort_col = col_map[str(sort_by).lower()]
+        sorted_dfs = []
+        for granularity, condition, _, _ in slices:
+            mask = (result_df["granularity"] == granularity) & (
+                result_df["condition"] == condition
+            )
+            sub_df = result_df[mask]
+            if not sub_df.empty:
+                sub_sorted = sub_df.sort_values(
+                    by=matched_sort_col, ascending=ascending, kind="mergesort"
+                )
+                sorted_dfs.append(sub_sorted)
+        if sorted_dfs:
+            result_df = pd.concat(sorted_dfs, ignore_index=True)
+
+    return result_df
 
 
 if __name__ == "__main__":
     repo_root = Path(__file__).resolve().parent.parent
-    default_distances_path = repo_root / "data" / "distances__all.csv"
+    default_distances_path = repo_root / "data" / "distances.tsv"
     default_mushra_path = (
         repo_root / "data" / "listening_test_responses_preprocessed.tsv"
     )
@@ -413,7 +446,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--level",
         choices=["all", "entire", "modulation", "modulation_timbre"],
-        default="entire",
+        default="modulation",
         help="Granularity level to compute (default: all)",
     )
     parser.add_argument(
@@ -436,6 +469,21 @@ if __name__ == "__main__":
         "--include-noise-ceiling",
         action="store_true",
         help="Include human noise ceilings as benchmark columns in the results.",
+    )
+    parser.add_argument(
+        "--sort-by",
+        default="pearson_group",
+        # default="pearson_indiv",
+        # default="spearman_group",
+        # default="spearman_indiv",
+        # default="kendall_group",
+        # default="kendall_indiv",
+        help="Column to sort loss functions by within each granularity + condition group (default: pearson_group). Set to 'none' to disable sorting.",
+    )
+    parser.add_argument(
+        "--ascending",
+        action="store_true",
+        help="Sort in ascending order instead of descending (default: descending).",
     )
     parser.add_argument(
         "--no-progress",
@@ -466,6 +514,8 @@ if __name__ == "__main__":
         exclude_reference=not args.include_reference,
         include_noise_ceiling=args.include_noise_ceiling,
         show_progress=not args.no_progress,
+        sort_by=args.sort_by,
+        ascending=args.ascending,
     )
 
     pd.set_option("display.max_columns", None)

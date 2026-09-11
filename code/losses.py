@@ -10,6 +10,7 @@ import torch.nn as nn
 from msclap import CLAP
 from torch import Tensor as T
 from torchaudio.transforms import Resample, MFCC
+from transformers import EncodecModel
 
 from kymatio.torch import Scattering1D, TimeFrequencyScattering
 from panns.model_loader import PANNsModel
@@ -88,10 +89,14 @@ class Scat1DLoss(nn.Module):
         T: Optional[Union[str, int]] = None,
         max_order: int = 1,
         p: int = 2,
+        use_rho_log1p: bool = False,
+        log1p_eps: float = 1e-3,
     ):
         super().__init__()
         self.max_order = max_order
         self.p = p
+        self.use_rho_log1p = use_rho_log1p
+        self.log1p_eps = log1p_eps
         self.scat_1d = Scattering1D(
             shape=(shape,),
             J=J,
@@ -108,6 +113,9 @@ class Scat1DLoss(nn.Module):
         assert x.size(1) == x_target.size(1) == 1
         Sx = self.scat_1d(x)
         Sx_target = self.scat_1d(x_target)
+        if self.use_rho_log1p:
+            Sx = tr.log1p(Sx / self.log1p_eps)
+            Sx_target = tr.log1p(Sx_target / self.log1p_eps)
         Sx = Sx[:, :, 1:, :]  # Remove the 0th order coefficients
         Sx_target = Sx_target[:, :, 1:, :]  # Remove the 0th order coefficients
 
@@ -123,7 +131,6 @@ class Scat1DLoss(nn.Module):
 class EmbeddingLoss(ABC, nn.Module):
     def __init__(self, use_time_varying: bool = False, in_sr: int = 44100, p: int = 2):
         super().__init__()
-        assert not use_time_varying  # TODO: tmp
         self.use_time_varying = use_time_varying
         self.in_sr = in_sr
         self.p = p
@@ -233,6 +240,112 @@ class PANNsEmbeddingLoss(EmbeddingLoss):
 
     def get_embedding(self, x: T) -> T:
         x_emb = self.model.get_embedding(x)
+        return x_emb
+
+
+class VGGishEmbeddingLoss(EmbeddingLoss):
+    def __init__(
+        self,
+        pretrained: bool = True,
+        postprocess: bool = False,
+        in_sr: int = 44100,
+        p: int = 2,
+        use_time_varying=False,
+    ):
+        self.pretrained = pretrained
+        self.postprocess = postprocess
+        super().__init__(use_time_varying=use_time_varying, in_sr=in_sr, p=p)
+        hub_kwargs = {}
+        try:
+            import inspect
+
+            if "trust_repo" in inspect.signature(tr.hub.load).parameters:
+                hub_kwargs["trust_repo"] = True
+        except Exception:
+            pass
+
+        self.model = tr.hub.load(
+            "harritaylor/torchvggish",
+            "vggish",
+            pretrained=pretrained,
+            postprocess=postprocess,
+            **hub_kwargs,
+        )
+        for param in self.parameters():
+            param.requires_grad = False
+        log.info(f"Froze {len(list(self.parameters()))} parameter tensors")
+        self.eval()
+
+    def get_model_sr(self) -> int:
+        return 16000
+
+    def get_model_n_samples(self) -> int:
+        return -1
+
+    def get_embedding(self, x: T) -> T:
+        squeeze_batch = False
+        if x.ndim == 1:
+            x = x.unsqueeze(0)
+            squeeze_batch = True
+        device = next(self.model.parameters()).device
+        self.model.device = device
+        embs = []
+        for i in range(x.size(0)):
+            audio_i = x[i]
+            # VGGish expects at least 0.96s (15360 samples at 16kHz)
+            if audio_i.size(-1) < 16000:
+                n_repeats = (16000 // audio_i.size(-1)) + 1
+                audio_i = audio_i.repeat(n_repeats)[:16000]
+            audio_np = audio_i.detach().cpu().numpy()
+            emb_i = self.model(audio_np, 16000)
+            embs.append(emb_i.to(device))
+        emb = tr.stack(embs, dim=0)
+        if squeeze_batch:
+            emb = emb.squeeze(0)
+        return emb
+
+
+class EncodecEmbeddingLoss(EmbeddingLoss):
+    def __init__(
+        self,
+        model_id: str = "facebook/encodec_48khz",
+        in_sr: int = 44100,
+        p: int = 2,
+        use_time_varying=False,
+    ):
+        self.model_id = model_id
+        self.model_sr = 48000 if "48khz" in model_id else 24000
+        super().__init__(use_time_varying=use_time_varying, in_sr=in_sr, p=p)
+        self.model = EncodecModel.from_pretrained(model_id)
+        assert self.model_sr == self.model.config.sampling_rate
+        self.channels = self.model.config.audio_channels
+        for param in self.parameters():
+            param.requires_grad = False
+        log.info(f"Froze {len(list(self.parameters()))} parameter tensors")
+        self.eval()
+
+    def get_model_sr(self) -> int:
+        return self.model_sr
+
+    def get_model_n_samples(self) -> int:
+        return -1
+
+    def get_embedding(self, x: T) -> T:
+        squeeze_batch = False
+        if x.ndim == 1:
+            x = x.unsqueeze(0)
+            squeeze_batch = True
+        if x.ndim == 2:
+            x = x.unsqueeze(1).repeat(1, self.channels, 1)
+        elif x.ndim == 3 and x.size(1) == 1 and self.channels == 2:
+            x = x.repeat(1, 2, 1)
+
+        device = next(self.model.parameters()).device
+        x = x.to(device)
+        x_emb = self.model.encoder(x)  # (batch, 128, time_steps)
+        x_emb = x_emb.transpose(1, 2)  # (batch, time_steps, 128)
+        if squeeze_batch:
+            x_emb = x_emb.squeeze(0)
         return x_emb
 
 
@@ -426,6 +539,8 @@ if __name__ == "__main__":
     # loss_fn = PANNsEmbeddingLoss(variant="cnn14-16k", in_sr=sr)
     # loss_fn = PANNsEmbeddingLoss(variant="cnn14-32k", in_sr=sr)
     # loss_fn = PANNsEmbeddingLoss(variant="wavegram-logmel", in_sr=sr)
+    # loss_fn = VGGishEmbeddingLoss(in_sr=sr)
+    # loss_fn = EncodecEmbeddingLoss(in_sr=sr)
 
     loss = loss_fn.forward(audio, audio_target)
     log.info(f"loss = {loss}")

@@ -6,6 +6,7 @@ import pandas as pd
 import torch as tr
 import torchaudio
 from auraloss.freq import MultiResolutionSTFTLoss
+from auraloss.time import ESRLoss
 from torch import Tensor as T
 from torch import nn
 
@@ -16,6 +17,8 @@ from losses import (
     MFCCDistance,
     LogMSSLoss,
     JTFSTLoss,
+    EncodecEmbeddingLoss,
+    VGGishEmbeddingLoss,
 )
 from plot_distances import DEFAULT_WAVETABLES, resolve_group
 from util import find_variants, parse_amount
@@ -157,7 +160,18 @@ if __name__ == "__main__":
     shift_seed = 42
     loss_fns = [
         ("mse", nn.MSELoss()),
-        ("mss", MultiResolutionSTFTLoss()),
+        # ("esr", ESRLoss()),
+        # ("mss", MultiResolutionSTFTLoss()),
+        # ("mss_log_lin", MultiResolutionSTFTLoss(
+        #     fft_sizes=[64, 128, 256, 512, 1024, 2048],
+        #     hop_sizes=[16, 32, 64, 128, 256, 512],
+        #     win_lengths=[64, 128, 256, 512, 1024, 2048],
+        #     w_sc=0.0,
+        #     w_phs=0.0,
+        #     w_lin_mag=1.0,
+        #     w_log_mag=1.0,
+        #     mag_distance="L1",
+        # )),
         # (
         #     "mss_rev",
         #     LogMSSLoss(
@@ -171,15 +185,23 @@ if __name__ == "__main__":
         #     ),
         # ),
         # ("mfcc", MFCCDistance(sr=sr)),
+        # ("mfcc_p2", MFCCDistance(sr=sr, p=2)),
+        # ("vggish", VGGishEmbeddingLoss(in_sr=sr)),
+        # ("vggish_tv", VGGishEmbeddingLoss(in_sr=sr, use_time_varying=True)),
         # ("clap", ClapEmbeddingLoss(use_cuda=False, in_sr=sr)),
+        # ("encodec48", EncodecEmbeddingLoss(in_sr=sr)),
+        # ("encodec48_tv", EncodecEmbeddingLoss(in_sr=sr, use_time_varying=True)),
         # ("panns_cnn14_32k", PANNsEmbeddingLoss(variant="cnn14-32k", in_sr=sr)),
         # (
         #     "panns_wavegram_logmel",
         #     PANNsEmbeddingLoss(variant="wavegram-logmel", in_sr=sr),
         # ),
         # ("scat1d", Scat1DLoss(shape=176400, J=12, Q1=8, Q2=2, T=None, max_order=2, p=2)),
+        # ("scat1d_log1p", Scat1DLoss(shape=176400, J=12, Q1=8, Q2=2, T=None, max_order=2, p=2, use_rho_log1p=True)),
+        # ("scat1d_cqt", Scat1DLoss(shape=176400, J=12, Q1=8, Q2=2, T=1, max_order=1, p=2)),
         # ("jtfs", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=3, Q_fr=2, T=None, F=None, format_="joint", p=2)),
         # ("jtfs2", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=5, Q_fr=2, T=2048, F=1, format_="joint", p=2, use_rho_log1p=True)),
+        # ("jtfs_log1p", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=5, Q_fr=2, T=None, F=None, format_="joint", p=2, use_rho_log1p=True)),
     ]
     wavetables = DEFAULT_WAVETABLES
     mod_sig_references = [
