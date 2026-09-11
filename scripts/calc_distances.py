@@ -178,7 +178,7 @@ def plot_distance_curve(
 
 
 if __name__ == "__main__":
-    samples_dir = "../out/samples_all"
+    samples_dir = "../out/audio_samples"
     save_dir = "../out/distances"
     sr = 44100
     target_lufs = -18
@@ -343,3 +343,11 @@ if __name__ == "__main__":
             )
             n_plots += 1
     log.info(f"Saved {n_plots} plots to {save_dir}")
+
+# Do anova for each loss function, create a table with checkmarks
+# Do a correlation analysis of the loss functions
+# Do a probe on the coefficients of the neural embeddings and wavelet functions and measure the noise ceiling
+# Visual graphs
+# Sell the human data side of it for the narrative
+
+
