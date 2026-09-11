@@ -1,8 +1,8 @@
 """ANOVA analysis for MUSHRA listening test data.
 
 Converted from scripts/MushraDataAnalysis.R.
-Includes data filtering (unsuitable devices, bad trials, reference score thresholds)
-and computes repeated-measures ANOVAs and post-hoc pairwise tests using pingouin and statsmodels.
+Computes repeated-measures ANOVAs and post-hoc pairwise tests using pingouin and statsmodels.
+Data filtering logic is modularized in scripts/data_preprocessing.py.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Union
 
@@ -18,96 +19,11 @@ import pingouin as pg
 from scipy import stats
 from statsmodels.stats.anova import AnovaRM
 
+from data_preprocessing import filter_mushra_data
+
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger(__name__)
 log.setLevel(level=os.environ.get("LOGLEVEL", "INFO"))
-
-
-def filter_mushra_data(
-    df: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Apply data cleaning and filtering heuristics from MushraDataAnalysis.R.
-
-    Filtering steps:
-    1. Filter out training trials ('trial_id != "training"').
-    2. Filter out pilot/debugging entries where comments == 'christhetree'.
-    4. Identify bad trials per participant:
-       - reference_score > 25 (hidden reference rated too high for difference rating)
-       - all_identical: participant gave the exact same rating to all stimuli in trial
-       - total_time < 24000 ms: trial completed in less than 24 seconds (rushed)
-       - rating_range < 10: difference between max and min ratings is under 10
-    5. Anti-join to remove all rows associated with bad trials.
-
-    Returns:
-        tuple[pd.DataFrame, pd.DataFrame]: (data_filtered, bad_trials)
-    """
-    initial_rows = len(df)
-    initial_participants = df["session_uuid"].nunique() if "session_uuid" in df.columns else 0
-    log.info(f"Starting data filtering: {initial_rows} rows from {initial_participants} participants.")
-
-    # 1. Basic setup: drop training trials and pilot comments
-    clean_mask = pd.Series(True, index=df.index)
-    if "trial_id" in df.columns:
-        clean_mask &= df["trial_id"] != "training"
-
-    if "comments" in df.columns:
-        is_christhetree = (
-            df["comments"].dropna().astype(str).str.strip().str.lower() == "christhetree"
-        )
-        clean_mask &= ~df.index.isin(is_christhetree[is_christhetree].index)
-
-    data_clean = df[clean_mask].copy()
-
-    # 3. Identify bad trials (grouped by session_uuid and trial_id)
-    if not all(col in data_clean.columns for col in ["session_uuid", "trial_id", "rating_score"]):
-        log.warning("Required columns for bad trial detection not found; skipping trial-level filtering.")
-        return data_clean, pd.DataFrame()
-
-    ref_scores = (
-        data_clean[data_clean.get("rating_stimulus", pd.Series(index=data_clean.index)) == "reference"]
-        .groupby(["session_uuid", "trial_id"])["rating_score"]
-        .first()
-        .rename("reference_score")
-    )
-
-    agg_dict = {
-        "n_distinct": ("rating_score", "nunique"),
-        "rating_min": ("rating_score", "min"),
-        "rating_max": ("rating_score", "max"),
-    }
-    if "rating_time" in data_clean.columns:
-        agg_dict["total_time"] = ("rating_time", "max")
-
-    stats_df = data_clean.groupby(["session_uuid", "trial_id"]).agg(**agg_dict).join(ref_scores)
-
-    stats_df["all_identical"] = stats_df["n_distinct"] == 1
-    stats_df["rating_range"] = stats_df["rating_max"] - stats_df["rating_min"]
-
-    bad_mask = (
-        (stats_df["reference_score"] > 25)
-        | (stats_df["all_identical"])
-        | (stats_df["rating_range"] < 10)
-    )
-    if "total_time" in stats_df.columns:
-        bad_mask |= stats_df["total_time"] < 24000
-
-    bad_trials = stats_df[bad_mask].reset_index()[["session_uuid", "trial_id"]]
-    log.info(f"Identified {len(bad_trials)} bad trials to exclude.")
-
-    # 4. Anti-join: remove bad trials
-    data_filtered = data_clean.merge(
-        bad_trials,
-        on=["session_uuid", "trial_id"],
-        how="left",
-        indicator=True,
-    )
-    data_filtered = data_filtered[data_filtered["_merge"] == "left_only"].drop(columns=["_merge"])
-
-    final_participants = data_filtered["session_uuid"].nunique()
-    log.info(
-        f"Filtered dataset ready: {len(data_filtered)} rows from {final_participants} participants."
-    )
-    return data_filtered, bad_trials
 
 
 def prepare_mushra_data(
@@ -116,7 +32,7 @@ def prepare_mushra_data(
 ) -> pd.DataFrame:
     """Load and prepare MUSHRA data for ANOVA analyses.
 
-    Optionally applies the cleaning and filtering steps from MushraDataAnalysis.R.
+    Optionally applies the cleaning and filtering steps from data_preprocessing.py.
     Extracts within-subject factor levels from `trial_id` (modulation, feature, source)
     and assigns `amount_group` ('Low' vs 'High') based on stimulus condition.
     """
@@ -188,11 +104,13 @@ def compute_anova_3way(
     Equivalent to R:
         mod_avg %>% anova_test(dv = mean_rating, wid = session_uuid, within = c(modulation, feature, source))
     """
-    log.info("Computing 3-way Repeated-Measures ANOVA (modulation x feature x source)...")
+    log.info(
+        "Computing 3-way Repeated-Measures ANOVA (modulation x feature x source)..."
+    )
     mod_avg = (
-        df.groupby([subject, "trial_id", "modulation", "feature", "source"], as_index=False)[
-            "rating_score"
-        ]
+        df.groupby(
+            [subject, "trial_id", "modulation", "feature", "source"], as_index=False
+        )["rating_score"]
         .mean()
         .rename(columns={"rating_score": dv})
     )
@@ -441,9 +359,19 @@ def run_all_anovas(
 
 
 if __name__ == "__main__":
+    filtered_data_path = (
+        Path(__file__).resolve().parent.parent
+        / "data"
+        / "listening_test_responses_filtered.tsv"
+    )
+    device_filtered_data_path = (
+        Path(__file__).resolve().parent.parent
+        / "data"
+        / "listening_test_responses_device_filtered.tsv"
+    )
+
     default_data_path = (
-        # Path(__file__).resolve().parent.parent / "data" / "listening_test_responses_device_filtered.tsv"
-        Path(__file__).resolve().parent.parent / "data" / "listening_test_responses_2_participants.tsv"
+        filtered_data_path if filtered_data_path.exists() else device_filtered_data_path
     )
 
     parser = argparse.ArgumentParser(
@@ -465,5 +393,6 @@ if __name__ == "__main__":
     if not os.path.exists(args.data_path):
         log.error(f"Data file not found at: {args.data_path}")
         parser.print_help()
-    else:
-        run_all_anovas(args.data_path, apply_filtering=not args.no_filter)
+        sys.exit(1)
+
+    run_all_anovas(args.data_path, apply_filtering=not args.no_filter)
