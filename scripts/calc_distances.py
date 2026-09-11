@@ -1,9 +1,7 @@
 import logging
 import os
-from typing import List, Optional, Tuple, Union
+from typing import List, Sequence, Tuple, Union
 
-import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 import torch as tr
 import torchaudio
@@ -11,34 +9,20 @@ from auraloss.freq import MultiResolutionSTFTLoss
 from torch import Tensor as T
 from torch import nn
 
-from util import find_variants, parse_amount
 from losses import (
-    MFCCDistance,
+    Scat1DLoss,
     PANNsEmbeddingLoss,
     ClapEmbeddingLoss,
+    MFCCDistance,
     LogMSSLoss,
-    Scat1DLoss,
     JTFSTLoss,
 )
+from plot_distances import DEFAULT_WAVETABLES, resolve_group
+from util import find_variants, parse_amount
 
 logging.basicConfig()
 log = logging.getLogger(__name__)
 log.setLevel(level=os.environ.get("LOGLEVEL", "INFO"))
-
-SERIES_COLOR = "#2a78d6"
-AXIS_COLOR = "#52514e"
-
-MOD_SIG_XLABELS = {
-    "amp": "Modulation depth",
-    "freq": "Modulation rate (Hz)",
-    "reg": "Modulation irregularity",
-}
-# Mod rates are spaced in octaves, the other amounts are spaced linearly
-MOD_SIG_LOG_X = {"freq"}
-# Larger wavetable groups are named "all" instead of by their common prefix
-MAX_NAMED_GROUP_SIZE = 3
-FIG_SIZE = (6, 6)
-DPI = 150
 
 
 def load_audio(path: str, sr: int) -> T:
@@ -67,119 +51,105 @@ def resolve_loss_fn(
     return entry.__class__.__name__, entry
 
 
-def resolve_group(entry: Union[str, List[str]]) -> Tuple[str, List[str]]:
-    """Normalize a wavetables entry into a (group name, wavetable names) pair. A
-    list of wavetables is averaged into a single curve and is named after the
-    common prefix of its members, e.g. ["brightness_real__...",
-    "brightness_synthetic__..."] -> "brightness". Groups of more than
-    MAX_NAMED_GROUP_SIZE wavetables are named "all"."""
-    if isinstance(entry, str):
-        return entry, [entry]
-    assert len(entry) > 0, "A wavetable group cannot be empty"
-    if len(entry) == 1:
-        return entry[0], list(entry)
-    if len(entry) > MAX_NAMED_GROUP_SIZE:
-        return "all", list(entry)
-    group_name = os.path.commonprefix(entry).rstrip("_")
-    if not group_name:
-        group_name = "__and__".join(entry)
-    return group_name, list(entry)
+def get_unique_wavetables(entries: Sequence[Union[str, Sequence[str]]]) -> List[str]:
+    """Extract ordered list of unique individual wavetables from wavetable/group definitions."""
+    unique: List[str] = []
+    for entry in entries:
+        if isinstance(entry, str):
+            if entry not in unique:
+                unique.append(entry)
+        else:
+            for item in entry:
+                if item not in unique:
+                    unique.append(item)
+    return unique
 
 
-def summarize_curve(df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate the distances of a group into a mean and a min-max range per
-    modulation amount."""
-    curve = (
-        df.groupby("amount")["distance"]
-        .agg(["mean", "min", "max", "count"])
-        .reset_index()
-    )
-    return curve.sort_values("amount")
+def compute_distances(
+    loss_fns: Sequence[Union[nn.Module, Tuple[str, nn.Module]]],
+    wavetables: Sequence[str],
+    mod_sig_references: Sequence[str],
+    samples_dir: str,
+    save_path: str,
+    sr: int = 44100,
+    target_lufs: int = -18,
+    use_rand_phase_shift: bool = False,
+    max_shift: int = 2048,
+    shift_seed: int = 42,
+) -> pd.DataFrame:
+    """Compute distances for single wavetables and save the result to a TSV file."""
+    os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+    suffix = f"_{target_lufs}lufs.wav"
+    rand_gen = tr.Generator().manual_seed(shift_seed)
 
+    loss_entries = [resolve_loss_fn(entry) for entry in loss_fns]
+    loss_names = [name for name, _ in loss_entries]
+    assert len(set(loss_names)) == len(
+        loss_names
+    ), f"Loss function names must be unique, got {loss_names}"
 
-def compute_ylim(curves: List[pd.DataFrame], pad: float = 0.05) -> Tuple[float, float]:
-    """Y range covering every curve of a loss function, including its min-max
-    ranges, so that all of its plots share a comparable axis."""
-    lo = min(c["min"].min() for c in curves)
-    hi = max(c["max"].max() for c in curves)
-    margin = pad * (hi - lo)
-    return lo - margin, hi + margin
+    rows = []
+    for loss_name, loss_fn in loss_entries:
+        for wt_name in wavetables:
+            for mod_sig in mod_sig_references:
+                ref_path = os.path.join(samples_dir, f"{wt_name}__{mod_sig}{suffix}")
+                assert os.path.exists(ref_path), f"Missing reference {ref_path}"
+                ref_audio = load_audio(ref_path, sr)
+                _, ref_amount, _ = parse_amount(mod_sig)
 
+                variant_paths = find_variants(samples_dir, wt_name, mod_sig, suffix)
+                log.info(
+                    f"{loss_name} | {wt_name} | {mod_sig}: found {len(variant_paths)} samples"
+                )
+                for variant_path in variant_paths:
+                    variant_name = os.path.basename(variant_path)[: -len(suffix)]
+                    variant_mod_sig = variant_name[len(f"{wt_name}__") :]
+                    _, amount, _ = parse_amount(variant_mod_sig)
+                    audio = load_audio(variant_path, sr)
+                    assert (
+                        audio.shape == ref_audio.shape
+                    ), f"Shape mismatch: {audio.shape} vs {ref_audio.shape}"
+                    if use_rand_phase_shift:
+                        shift = int(
+                            tr.randint(
+                                low=0,
+                                high=max_shift + 1,
+                                size=(1,),
+                                generator=rand_gen,
+                            ).item()
+                        )
+                    else:
+                        shift = 0
+                    with tr.no_grad():
+                        dist = loss_fn(
+                            audio, phase_shift_audio(ref_audio, shift)
+                        ).item()
+                    rows.append(
+                        {
+                            "loss_fn": loss_name,
+                            "wavetable": wt_name,
+                            "mod_type": mod_sig.split("_", 1)[0],
+                            "reference": mod_sig,
+                            "ref_amount": ref_amount,
+                            "mod_sig": variant_mod_sig,
+                            "amount": amount,
+                            "is_reference": amount == ref_amount,
+                            "ref_shift": shift,
+                            "distance": dist,
+                        }
+                    )
+                    log.info(f"  {variant_mod_sig}: {dist:.6g} (shift={shift})")
 
-def plot_distance_curve(
-    curve: pd.DataFrame,
-    loss_name: str,
-    group_name: str,
-    mod_sig: str,
-    ylim: Optional[Tuple[float, float]] = None,
-    max_shift: int = 0,
-    save_dir: str = "",
-) -> None:
-    mod_type = mod_sig.split("_", 1)[0]
-    _, ref_amount, _ = parse_amount(mod_sig)
-    n_wt = int(curve["count"].max())
-
-    yerr = None
-    if n_wt > 1:
-        # Asymmetric bars spanning the min and max of the group
-        yerr = np.stack([curve["mean"] - curve["min"], curve["max"] - curve["mean"]])
-
-    fig, ax = plt.subplots(figsize=FIG_SIZE)
-    ax.set_box_aspect(1)  # Square plotting area, not a square figure
-    ax.errorbar(
-        curve["amount"],
-        curve["mean"],
-        yerr=yerr,
-        color=SERIES_COLOR,
-        linewidth=2.0,
-        marker="o",
-        markersize=8,
-        capsize=4,
-        elinewidth=1.5,
-    )
-    ax.axvline(
-        ref_amount,
-        color=AXIS_COLOR,
-        linewidth=1.0,
-        linestyle="--",
-        alpha=0.5,
-        label=f"reference = {ref_amount:g}",
-    )
-    ax.legend(loc="best", frameon=False, fontsize=8, labelcolor=AXIS_COLOR)
-    if mod_type in MOD_SIG_LOG_X:
-        ax.set_xscale("log", base=2)
-        ticks = sorted(set(curve["amount"].tolist() + [ref_amount]))
-        ax.set_xticks(ticks)
-        ax.set_xticklabels([f"{t:g}" for t in ticks])
-        ax.minorticks_off()
-    if ylim is not None:
-        ax.set_ylim(*ylim)
-    ax.set_xlabel(MOD_SIG_XLABELS[mod_type])
-    ax.set_ylabel(f"{loss_name} distance")
-    title = f"{loss_name} distance from {mod_sig}\n{group_name}"
-    if n_wt > 1:
-        title += f"\nmean of {n_wt} wavetables with min-max range"
-    else:
-        # Kept 3 lines tall so every plot ends up the same size
-        title += "\nsingle wavetable"
-    if max_shift > 0:
-        title += f"\nref phase-shifted by 0-{max_shift} samples"
-    ax.set_title(title, fontsize=10)
-    ax.grid(True, color=AXIS_COLOR, alpha=0.15, linewidth=0.8)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    plt.tight_layout()
-    # plt.show()
-    if save_dir:
-        save_name = f"{loss_name}__{group_name}__{mod_sig}.png"
-        plt.savefig(os.path.join(save_dir, save_name), dpi=DPI)
-        log.info(f"Saved {save_name}")
-    plt.close(fig)
+    df = pd.DataFrame(rows)
+    df.to_csv(save_path, index=False, sep="\t")
+    log.info(f"Saved {len(df)} distances to {save_path}")
+    return df
 
 
 if __name__ == "__main__":
     samples_dir = "../out/audio_samples"
     save_dir = "../out/distances"
+    tsv_path = os.path.join(save_dir, "distances_testing.tsv")
     sr = 44100
     target_lufs = -18
     use_rand_phase_shift = False
@@ -209,35 +179,9 @@ if __name__ == "__main__":
         # ),
         # ("scat1d", Scat1DLoss(shape=176400, J=12, Q1=8, Q2=2, T=None, max_order=2, p=2)),
         # ("jtfs", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=3, Q_fr=2, T=None, F=None, format_="joint", p=2)),
+        # ("jtfs2", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=5, Q_fr=2, T=2048, F=1, format_="joint", p=2, use_rho_log1p=True)),
     ]
-    wavetables = [
-        # "brightness_real__harmonics__synced_sines__256_1024",
-        # "brightness_synthetic__256_1024",
-        # "richness_real__filter__acid_saw__46_1024__inverted",
-        # "richness_synthetic__256_1024",
-        # "warmth_real__vintage__logue_saw__166_1024",
-        # "warmth_synthetic__256_1024",
-        # [
-        #     "brightness_real__harmonics__synced_sines__256_1024",
-        #     "brightness_synthetic__256_1024",
-        # ],
-        # [
-        #     "richness_real__filter__acid_saw__46_1024__inverted",
-        #     "richness_synthetic__256_1024",
-        # ],
-        # [
-        #     "warmth_real__vintage__logue_saw__166_1024",
-        #     "warmth_synthetic__256_1024",
-        # ],
-        [
-            "brightness_real__harmonics__synced_sines__256_1024",
-            "brightness_synthetic__256_1024",
-            "richness_real__filter__acid_saw__46_1024__inverted",
-            "richness_synthetic__256_1024",
-            "warmth_real__vintage__logue_saw__166_1024",
-            "warmth_synthetic__256_1024",
-        ],
-    ]
+    wavetables = DEFAULT_WAVETABLES
     mod_sig_references = [
         "amp_1.00hz_0.10",
         "freq_0.25hz",
@@ -245,109 +189,30 @@ if __name__ == "__main__":
     ]
 
     os.makedirs(save_dir, exist_ok=True)
-    suffix = f"_{target_lufs}lufs.wav"
-    rand_gen = tr.Generator().manual_seed(shift_seed)
 
+    # 1. Resolve group definitions
     groups = [resolve_group(entry) for entry in wavetables]
     group_names = [name for name, _ in groups]
     assert len(set(group_names)) == len(
         group_names
     ), f"Wavetable group names must be unique, got {group_names}"
-    loss_names = [resolve_loss_fn(entry)[0] for entry in loss_fns]
-    assert len(set(loss_names)) == len(
-        loss_names
-    ), f"Loss function names must be unique, got {loss_names}"
 
-    rows = []
-    for loss_entry in loss_fns:
-        loss_name, loss_fn = resolve_loss_fn(loss_entry)
-        for group_name, wt_names in groups:
-            for wt_name in wt_names:
-                for mod_sig in mod_sig_references:
-                    ref_path = os.path.join(
-                        samples_dir, f"{wt_name}__{mod_sig}{suffix}"
-                    )
-                    assert os.path.exists(ref_path), f"Missing reference {ref_path}"
-                    ref_audio = load_audio(ref_path, sr)
-                    _, ref_amount, _ = parse_amount(mod_sig)
+    # 2. Extract unique single wavetables to avoid duplicate distance calculations
+    unique_wavetables = get_unique_wavetables(wavetables)
+    log.info(
+        f"Computing distances for {len(unique_wavetables)} unique wavetables (no duplicate computation)"
+    )
 
-                    variant_paths = find_variants(samples_dir, wt_name, mod_sig, suffix)
-                    log.info(
-                        f"{loss_name} | {wt_name} | {mod_sig}: "
-                        f"found {len(variant_paths)} samples"
-                    )
-                    for variant_path in variant_paths:
-                        variant_name = os.path.basename(variant_path)[: -len(suffix)]
-                        variant_mod_sig = variant_name[len(f"{wt_name}__") :]
-                        _, amount, _ = parse_amount(variant_mod_sig)
-                        audio = load_audio(variant_path, sr)
-                        assert (
-                            audio.shape == ref_audio.shape
-                        ), f"Shape mismatch: {audio.shape} vs {ref_audio.shape}"
-                        # Optionally simulate a phase shift by shifting the reference
-                        if use_rand_phase_shift:
-                            shift = int(
-                                tr.randint(
-                                    low=0,
-                                    high=max_shift + 1,
-                                    size=(1,),
-                                    generator=rand_gen,
-                                ).item()
-                            )
-                        else:
-                            shift = 0
-                        with tr.no_grad():
-                            dist = loss_fn(
-                                audio, phase_shift_audio(ref_audio, shift)
-                            ).item()
-                        rows.append(
-                            {
-                                "loss_fn": loss_name,
-                                "group": group_name,
-                                "wavetable": wt_name,
-                                "mod_type": mod_sig.split("_", 1)[0],
-                                "reference": mod_sig,
-                                "ref_amount": ref_amount,
-                                "mod_sig": variant_mod_sig,
-                                "amount": amount,
-                                "is_reference": amount == ref_amount,
-                                "ref_shift": shift,
-                                "distance": dist,
-                            }
-                        )
-                        log.info(f"  {variant_mod_sig}: {dist:.6g} (shift={shift})")
-
-    df = pd.DataFrame(rows)
-    csv_path = os.path.join(save_dir, "distances.csv")
-    df.to_csv(csv_path, index=False)
-    log.info(f"Saved {len(df)} distances to {csv_path}")
-
-    n_plots = 0
-    for loss_name, loss_df in df.groupby("loss_fn", sort=False):
-        curves = {
-            keys: summarize_curve(group)
-            for keys, group in loss_df.groupby(["group", "reference"], sort=False)
-        }
-        # Fixed y range per loss function so its plots can be compared
-        ylim = compute_ylim(list(curves.values()))
-        log.info(f"{loss_name} ylim = ({ylim[0]:.6g}, {ylim[1]:.6g})")
-        for (group_name, mod_sig), curve in curves.items():
-            plot_distance_curve(
-                curve,
-                loss_name,
-                group_name,
-                mod_sig,
-                ylim=ylim,
-                max_shift=max_shift if use_rand_phase_shift else 0,
-                save_dir=save_dir,
-            )
-            n_plots += 1
-    log.info(f"Saved {n_plots} plots to {save_dir}")
-
-# Do anova for each loss function, create a table with checkmarks
-# Do a correlation analysis of the loss functions
-# Do a probe on the coefficients of the neural embeddings and wavelet functions and measure the noise ceiling
-# Visual graphs
-# Sell the human data side of it for the narrative
-
-
+    # 3. Compute distances on single wavetables and save to TSV
+    compute_distances(
+        loss_fns=loss_fns,
+        wavetables=unique_wavetables,
+        mod_sig_references=mod_sig_references,
+        samples_dir=samples_dir,
+        save_path=tsv_path,
+        sr=sr,
+        target_lufs=target_lufs,
+        use_rand_phase_shift=use_rand_phase_shift,
+        max_shift=max_shift,
+        shift_seed=shift_seed,
+    )
