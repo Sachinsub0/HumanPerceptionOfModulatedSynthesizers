@@ -12,10 +12,12 @@ Definitions:
 - Individual Upper Bound (Grand Mean):
     Mean correlation of each participant's ratings with the grand mean across all
     participants: mean(corr(s_i, mean_all(s))).
-- Group-Level Ceiling (Split-Half with Spearman-Brown Prophecy):
+- Group-Level Ceiling (Monte Carlo Split-Half):
     Reliability of the group average rating estimated via Monte Carlo split-half
-    resampling with the Spearman-Brown formula: R = 2 * r_half / (1 + r_half).
-    Provided for Pearson (linear), Spearman (rank/monotonic), and Kendall (concordance) metrics.
+    resampling. Spearman-Brown prophecy correction (R = 2 * r / (1 + r)) is applied
+    to Pearson and Spearman; raw split-half correlation is reported for Kendall tau.
+    All standard deviations are sample standard deviations (ddof=1).
+    95% bootstrap confidence intervals are computed via the 2.5th and 97.5th percentiles.
 """
 
 from __future__ import annotations
@@ -98,18 +100,24 @@ def _compute_slice_ceilings(
             "pearson_upper_std": float("nan"),
             "pearson_group": float("nan"),
             "pearson_group_std": float("nan"),
+            "pearson_group_ci95_low": float("nan"),
+            "pearson_group_ci95_high": float("nan"),
             "spearman_lower": float("nan"),
             "spearman_lower_std": float("nan"),
             "spearman_upper": float("nan"),
             "spearman_upper_std": float("nan"),
             "spearman_group": float("nan"),
             "spearman_group_std": float("nan"),
+            "spearman_group_ci95_low": float("nan"),
+            "spearman_group_ci95_high": float("nan"),
             "kendall_lower": float("nan"),
             "kendall_lower_std": float("nan"),
             "kendall_upper": float("nan"),
             "kendall_upper_std": float("nan"),
             "kendall_group": float("nan"),
             "kendall_group_std": float("nan"),
+            "kendall_group_ci95_low": float("nan"),
+            "kendall_group_ci95_high": float("nan"),
         }
 
     # 1. Individual ceiling (Leave-One-Out vs Grand Mean)
@@ -141,7 +149,9 @@ def _compute_slice_ceilings(
         k_lower.append(kr_low)
         k_upper.append(kr_up)
 
-    # 2. Group-level split-half reliability with Spearman-Brown prophecy formula
+    # 2. Group-level split-half reliability
+    # Spearman-Brown prophecy formula is applied to Pearson and Spearman;
+    # Kendall tau is left uncorrected (raw split-half concordance).
     rng = np.random.default_rng(seed)
     cols = matrix.columns.to_numpy()
     half = n_subjects // 2
@@ -155,45 +165,60 @@ def _compute_slice_ceilings(
         m1 = matrix[shuffled[:half]].mean(axis=1)
         m2 = matrix[shuffled[half:]].mean(axis=1)
 
-        # Pearson split-half
+        # Pearson split-half (with Spearman-Brown correction)
         pr, _ = stats.pearsonr(m1, m2)
         if not np.isnan(pr) and (1 + pr) != 0:
             p_sb = (2 * pr) / (1 + pr)
             p_splits.append(p_sb)
 
-        # Spearman split-half
+        # Spearman split-half (with Spearman-Brown correction)
         sr, _ = stats.spearmanr(m1, m2)
         if not np.isnan(sr) and (1 + sr) != 0:
             s_sb = (2 * sr) / (1 + sr)
             s_splits.append(s_sb)
 
-        # Kendall split-half
+        # Kendall split-half (raw split-half without Spearman-Brown correction)
         kr, _ = stats.kendalltau(m1, m2)
-        if not np.isnan(kr) and (1 + kr) != 0:
-            k_sb = (2 * kr) / (1 + kr)
-            k_splits.append(k_sb)
+        if not np.isnan(kr):
+            k_splits.append(kr)
+
+    # Compute 95% bootstrap confidence intervals (2.5th and 97.5th percentiles)
+    p_ci_low = float(np.percentile(p_splits, 2.5)) if p_splits else float("nan")
+    p_ci_high = float(np.percentile(p_splits, 97.5)) if p_splits else float("nan")
+
+    s_ci_low = float(np.percentile(s_splits, 2.5)) if s_splits else float("nan")
+    s_ci_high = float(np.percentile(s_splits, 97.5)) if s_splits else float("nan")
+
+    k_ci_low = float(np.percentile(k_splits, 2.5)) if k_splits else float("nan")
+    k_ci_high = float(np.percentile(k_splits, 97.5)) if k_splits else float("nan")
 
     return {
         "n_stimuli": n_stimuli,
         "n_subjects": n_subjects,
         "pearson_lower": float(np.mean(p_lower)),
-        "pearson_lower_std": float(np.std(p_lower)),
+        "pearson_lower_std": float(np.std(p_lower, ddof=1)),
         "pearson_upper": float(np.mean(p_upper)),
-        "pearson_upper_std": float(np.std(p_upper)),
+        "pearson_upper_std": float(np.std(p_upper, ddof=1)),
         "pearson_group": float(np.mean(p_splits)) if p_splits else float("nan"),
-        "pearson_group_std": float(np.std(p_splits)) if p_splits else float("nan"),
+        "pearson_group_std": float(np.std(p_splits, ddof=1)) if p_splits else float("nan"),
+        "pearson_group_ci95_low": p_ci_low,
+        "pearson_group_ci95_high": p_ci_high,
         "spearman_lower": float(np.mean(s_lower)),
-        "spearman_lower_std": float(np.std(s_lower)),
+        "spearman_lower_std": float(np.std(s_lower, ddof=1)),
         "spearman_upper": float(np.mean(s_upper)),
-        "spearman_upper_std": float(np.std(s_upper)),
+        "spearman_upper_std": float(np.std(s_upper, ddof=1)),
         "spearman_group": float(np.mean(s_splits)) if s_splits else float("nan"),
-        "spearman_group_std": float(np.std(s_splits)) if s_splits else float("nan"),
+        "spearman_group_std": float(np.std(s_splits, ddof=1)) if s_splits else float("nan"),
+        "spearman_group_ci95_low": s_ci_low,
+        "spearman_group_ci95_high": s_ci_high,
         "kendall_lower": float(np.mean(k_lower)),
-        "kendall_lower_std": float(np.std(k_lower)),
+        "kendall_lower_std": float(np.std(k_lower, ddof=1)),
         "kendall_upper": float(np.mean(k_upper)),
-        "kendall_upper_std": float(np.std(k_upper)),
+        "kendall_upper_std": float(np.std(k_upper, ddof=1)),
         "kendall_group": float(np.mean(k_splits)) if k_splits else float("nan"),
-        "kendall_group_std": float(np.std(k_splits)) if k_splits else float("nan"),
+        "kendall_group_std": float(np.std(k_splits, ddof=1)) if k_splits else float("nan"),
+        "kendall_group_ci95_low": k_ci_low,
+        "kendall_group_ci95_high": k_ci_high,
     }
 
 
@@ -292,7 +317,9 @@ def compute_noise_ceiling(
     )
     for granularity, condition, n_trials, pivot_slice in pbar:
         pbar.set_postfix_str(condition)
-        res = _compute_slice_ceilings(pivot_slice, n_bootstraps=n_bootstraps, seed=seed)
+        res = _compute_slice_ceilings(
+            pivot_slice, n_bootstraps=n_bootstraps, seed=seed
+        )
         res["granularity"] = granularity
         res["condition"] = condition
         res["n_trials"] = n_trials
