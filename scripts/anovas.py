@@ -359,19 +359,10 @@ def run_all_anovas(
 
 
 if __name__ == "__main__":
-    filtered_data_path = (
+    data_path = (
         Path(__file__).resolve().parent.parent
         / "data"
-        / "listening_test_responses_filtered.tsv"
-    )
-    device_filtered_data_path = (
-        Path(__file__).resolve().parent.parent
-        / "data"
-        / "listening_test_responses_device_filtered.tsv"
-    )
-
-    default_data_path = (
-        filtered_data_path if filtered_data_path.exists() else device_filtered_data_path
+        / "listening_test_responses_preprocessed.tsv"
     )
 
     parser = argparse.ArgumentParser(
@@ -380,8 +371,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "data_path",
         nargs="?",
-        default=str(default_data_path),
-        help=f"Path to the MUSHRA data file (tsv or csv; default: {default_data_path})",
+        default=str(data_path),
+        help=f"Path to the MUSHRA data file (tsv or csv; default: {data_path})",
     )
     parser.add_argument(
         "--no-filter",

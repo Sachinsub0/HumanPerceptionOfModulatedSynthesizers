@@ -26,11 +26,12 @@ Metrics:
 from __future__ import annotations
 
 import argparse
+import ast
 import logging
 import os
 import sys
 from pathlib import Path
-from typing import Literal, Sequence, Union, Optional
+from typing import Literal, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -69,6 +70,57 @@ AMOUNT_TO_STIMULUS = {
         0.500: "condition_d",
     },
 }
+
+
+def parse_loss_fn_arg(loss_fn: Union[str, Sequence[str]]) -> list[str]:
+    """Parse loss function argument into a flat list of loss function names.
+
+    Supports:
+    - 'all' or ['all'] -> ['all']
+    - Single string: 'clap2' -> ['clap2']
+    - Comma-separated string: 'clap2, jtfs' -> ['clap2', 'jtfs']
+    - JSON or Python list string: '["jtfs_log1p", "scat1d_log1p"]'
+    - Sequence/list of strings: ['jtfs_log1p', 'scat1d_log1p']
+    - CLI multiple args: ['jtfs_log1p', 'scat1d_log1p']
+    """
+    if isinstance(loss_fn, str):
+        candidates = [loss_fn]
+    else:
+        candidates = list(loss_fn)
+
+    results: list[str] = []
+    for item in candidates:
+        item_str = str(item).strip()
+        if not item_str:
+            continue
+        # Check for brackets/parens (JSON / Python list/tuple literal)
+        if (item_str.startswith("[") and item_str.endswith("]")) or (
+            item_str.startswith("(") and item_str.endswith(")")
+        ):
+            try:
+                parsed = ast.literal_eval(item_str)
+                if isinstance(parsed, (list, tuple)):
+                    for x in parsed:
+                        x_str = str(x).strip().strip("\"'")
+                        if x_str:
+                            results.append(x_str)
+                    continue
+            except (ValueError, SyntaxError):
+                pass
+        # Check for comma separation
+        if "," in item_str:
+            for part in item_str.split(","):
+                cleaned = part.strip().strip("\"'")
+                if cleaned:
+                    results.append(cleaned)
+        else:
+            cleaned = item_str.strip().strip("\"'")
+            if cleaned:
+                results.append(cleaned)
+
+    if any(x.lower() == "all" for x in results) or not results:
+        return ["all"]
+    return results
 
 
 def prepare_distances(
@@ -257,7 +309,7 @@ def compute_correlations(
         distances_source: CSV/TSV path or DataFrame of audio loss distances.
         mushra_source: TSV/CSV path or DataFrame of preprocessed MUSHRA responses.
         level: Granularity level ('entire', 'modulation', 'modulation_timbre', or 'all').
-        loss_fn: Specific loss function name(s) or 'all' to evaluate all available losses.
+        loss_fn: Specific loss function name(s), sequence of names, JSON/comma list, or 'all'.
         complete_subjects: 'slice' (complete data for that condition) or 'global' (complete across all 18 trials).
         exclude_reference: Exclude reference stimulus rating (default: True).
         include_noise_ceiling: Compute and append noise ceiling benchmark columns from noise_ceiling.py.
@@ -286,14 +338,13 @@ def compute_correlations(
 
     # Determine loss functions to evaluate
     all_available_losses = sorted(df_dist["loss_fn"].unique())
-    if loss_fn == "all":
+    parsed_losses = parse_loss_fn_arg(loss_fn)
+    if parsed_losses == ["all"]:
         selected_losses = all_available_losses
-    elif isinstance(loss_fn, str):
-        selected_losses = [loss_fn]
     else:
-        selected_losses = list(loss_fn)
+        selected_losses = parsed_losses
 
-    unknown_losses = set(selected_losses) - set(all_available_losses)
+    unknown_losses = [l for l in selected_losses if l not in all_available_losses]
     if unknown_losses:
         raise ValueError(
             f"Unknown loss function(s): {unknown_losses}. Available: {all_available_losses}"
@@ -426,6 +477,7 @@ if __name__ == "__main__":
     default_distances_path = repo_root / "data" / "distances.tsv"
     default_mushra_path = (
         repo_root / "data" / "listening_test_responses_preprocessed.tsv"
+        # repo_root / "data" / "listening_test_responses_preprocessed_prev.tsv"
     )
 
     parser = argparse.ArgumentParser(
@@ -446,13 +498,23 @@ if __name__ == "__main__":
     parser.add_argument(
         "--level",
         choices=["all", "entire", "modulation", "modulation_timbre"],
+        # default="all",
         default="modulation",
         help="Granularity level to compute (default: all)",
     )
     parser.add_argument(
         "--loss-fn",
-        default="all",
-        help="Specific loss function to evaluate (or 'all' for all loss functions, default: all)",
+        "--loss-fns",
+        "-l",
+        nargs="+",
+        # default=["all"],
+        # default=["jtfs_log1p", "scat1d_log1p", "vggish", "panns_wavegram_logmel", "clap2", "encodec48", "esr", "mss_rev", "mss_log_lin", "mfcc"],
+        default=["jtfs_log1p", "scat1d_log1p", "vggish", "panns_wavegram_logmel", "clap2", "encodec48", "mss_rev", "mss_log_lin", "mfcc"],
+        help=(
+            "Specific loss function(s) to evaluate. Accepts multiple names (e.g. -l jtfs_log1p scat1d_log1p), "
+            "comma-separated string ('jtfs_log1p,scat1d_log1p'), a Python/JSON list representation, "
+            "or 'all' (default: all)."
+        ),
     )
     parser.add_argument(
         "--complete-subjects",
@@ -472,9 +534,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--sort-by",
-        default="pearson_group",
+        # default="pearson_group",
         # default="pearson_indiv",
-        # default="spearman_group",
+        default="spearman_group",
         # default="spearman_indiv",
         # default="kendall_group",
         # default="kendall_indiv",
