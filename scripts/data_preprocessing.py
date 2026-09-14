@@ -9,7 +9,7 @@ Implements data quality heuristics:
 3. Identifies and excludes bad trials among remaining participants based on:
    - all_identical (participant gave identical ratings to all stimuli)
    - total_time < 24000 ms (trial completed in less than 24 seconds)
-   - rating_range < 10 (difference between max and min ratings is under 10)
+   - (optional, default False) rating_range < 10 (difference between max and min ratings is under 10)
 4. Anti-joins to remove bad trials.
 5. Saves the clean filtered dataset to TSV and outputs a detailed removal breakdown.
 """
@@ -34,6 +34,8 @@ def filter_mushra_data(
     df: pd.DataFrame,
     ref_score_threshold: float = 10.0,
     ref_rate_threshold: float = 0.15,
+    filter_rating_range: bool = False,
+    min_rating_range: float = 10.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Apply data cleaning and filtering heuristics for MUSHRA listening test responses.
 
@@ -45,8 +47,15 @@ def filter_mushra_data(
     3. Identify bad trials among remaining participants:
        - all_identical: participant gave the exact same rating to all stimuli in trial
        - total_time < 24000 ms: trial completed in less than 24 seconds (rushed)
-       - rating_range < 10: difference between max and min ratings is under 10
+       - (optional) rating_range < `min_rating_range`: difference between max and min ratings is under threshold
     4. Anti-join to remove all rows associated with bad trials.
+
+    Args:
+        df: Input DataFrame containing MUSHRA listening test responses.
+        ref_score_threshold: Rating score above which a reference stimulus is considered poor.
+        ref_rate_threshold: Proportion of reference trials above threshold that triggers subject exclusion.
+        filter_rating_range: Whether to filter trials based on rating range < min_rating_range (default False).
+        min_rating_range: Minimum required difference between max and min ratings in a trial (default 10.0).
 
     Returns:
         tuple[pd.DataFrame, pd.DataFrame]: (data_filtered, bad_trials)
@@ -127,17 +136,26 @@ def filter_mushra_data(
         if "total_time" in stats_df.columns
         else pd.Series(False, index=stats_df.index)
     )
-    crit_range = stats_df["rating_range"] < 10
+    crit_range = (
+        stats_df["rating_range"] < min_rating_range
+        if filter_rating_range
+        else pd.Series(False, index=stats_df.index)
+    )
 
     bad_mask = crit_identical | crit_time | crit_range
 
     bad_trials = stats_df[bad_mask].reset_index()[["session_uuid", "trial_id"]].copy()
     bad_trials.attrs["bad_users"] = bad_users_list
-    bad_trials.attrs["criteria_counts"] = {
+
+    criteria_counts = {
         "total_time < 24000 ms": int(crit_time.sum()),
-        "rating_range < 10": int(crit_range.sum()),
         "all_identical": int(crit_identical.sum()),
     }
+    if filter_rating_range:
+        criteria_counts[f"rating_range < {min_rating_range:.0f}"] = int(crit_range.sum())
+    bad_trials.attrs["criteria_counts"] = criteria_counts
+    bad_trials.attrs["rating_range_filtered"] = filter_rating_range
+
     log.info(
         f"Identified {len(bad_trials)} bad trials to exclude among remaining participants."
     )
@@ -165,6 +183,8 @@ def filter_and_save(
     output_path: Union[str, Path] | None = None,
     ref_score_threshold: float = 10.0,
     ref_rate_threshold: float = 0.15,
+    filter_rating_range: bool = False,
+    min_rating_range: float = 10.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, Path]:
     """Filter raw MUSHRA listening test data, save the filtered dataset to TSV, and report removals.
 
@@ -190,6 +210,8 @@ def filter_and_save(
         df_raw,
         ref_score_threshold=ref_score_threshold,
         ref_rate_threshold=ref_rate_threshold,
+        filter_rating_range=filter_rating_range,
+        min_rating_range=min_rating_range,
     )
 
     final_users = (
@@ -328,6 +350,18 @@ if __name__ == "__main__":
         default=0.15,
         help="Rate threshold above which a user is excluded for bad reference ratings (default: 0.15)",
     )
+    parser.add_argument(
+        "--filter-rating-range",
+        action="store_true",
+        default=False,
+        help="Filter out trials where rating range (max - min) is < min-rating-range (default: False)",
+    )
+    parser.add_argument(
+        "--min-rating-range",
+        type=float,
+        default=10.0,
+        help="Threshold for rating range filter when enabled (default: 10.0)",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.data_path):
@@ -340,6 +374,8 @@ if __name__ == "__main__":
         output_path=args.output,
         ref_score_threshold=args.ref_score_threshold,
         ref_rate_threshold=args.ref_rate_threshold,
+        filter_rating_range=args.filter_rating_range,
+        min_rating_range=args.min_rating_range,
     )
 
 
@@ -373,19 +409,18 @@ if __name__ == "__main__":
 #       * d6cf2853-febf-4e8f-89f4-2e598f9637af: 17/18 trials (94.4%)
 #       * ff7d76b3-8310-47a8-aa3c-5ebcea2d1cf9: 8/18 trials (44.4%)
 #
-# Trials removed: 476
+# Trials removed: 474
 #   - Training trials excluded:                     51
 #   - Trials from excluded users:                   414
-#   - Bad quality trials excluded (retained users): 11
+#   - Bad quality trials excluded (retained users): 9
 #     Breakdown by criterion (trials may match multiple):
 #       * total_time < 24000 ms : 7 trials
-#       * rating_range < 10     : 4 trials
 #       * all_identical         : 2 trials
 #
 # Final dataset:
 #   - Initial dataset:  969 trials across 51 users (4845 rows)
-#   - Filtered dataset: 493 trials across 28 users (2465 rows)
-#   - Users with complete data (18 trials): 21 of 28 (75.0%)
+#   - Filtered dataset: 495 trials across 28 users (2475 rows)
+#   - Users with complete data (18 trials): 23 of 28 (82.1%)
 # ======================================================================
 
 # Also removed 3 laptop speaker users

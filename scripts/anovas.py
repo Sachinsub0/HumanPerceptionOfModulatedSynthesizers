@@ -2,7 +2,7 @@
 
 Converted from scripts/MushraDataAnalysis.R.
 Computes repeated-measures ANOVAs and post-hoc pairwise tests using pingouin and statsmodels.
-Data filtering logic is modularized in scripts/data_preprocessing.py.
+Assumes the input TSV/CSV dataset has already been cleaned and quality-filtered.
 """
 
 from __future__ import annotations
@@ -14,66 +14,119 @@ import sys
 from pathlib import Path
 from typing import Union
 
+import numpy as np
 import pandas as pd
 import pingouin as pg
 from scipy import stats
-from statsmodels.stats.anova import AnovaRM
-
-from data_preprocessing import filter_mushra_data
+from statsmodels.formula._manager import FormulaManager
+from statsmodels.regression.linear_model import OLS
+from statsmodels.stats.anova import _not_slice, _ssr_reduced_model
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger(__name__)
 log.setLevel(level=os.environ.get("LOGLEVEL", "INFO"))
 
 
-def prepare_mushra_data(
-    data_source: Union[str, Path, pd.DataFrame],
-    apply_filtering: bool = True,
+def compute_rm_anova_with_effect_sizes(
+    df: pd.DataFrame,
+    dv: str,
+    subject: str,
+    within: list[str],
 ) -> pd.DataFrame:
-    """Load and prepare MUSHRA data for ANOVA analyses.
+    """Compute Repeated-Measures ANOVA for N within-subject factors with effect sizes.
 
-    Optionally applies the cleaning and filtering steps from data_preprocessing.py.
-    Extracts within-subject factor levels from `trial_id` (modulation, feature, source)
-    and assigns `amount_group` ('Low' vs 'High') based on stimulus condition.
+    Computes:
+    - Sums of Squares (SS) and Mean Squares (MS) for effects and errors
+    - F-statistic and uncorrected p-value (p_unc)
+    - Partial eta-squared (np2 = SS_effect / (SS_effect + SS_error))
+    - Generalized eta-squared (ng2 = SS_effect / (SS_effect + SS_subject + sum(SS_errors)))
+      following Olejnik & Algina (2003) and Bakeman (2005) for fully within-subject designs.
     """
-    if isinstance(data_source, (str, Path)):
-        file_path = Path(data_source).expanduser()
-        log.info(f"Loading data from {file_path}")
-        # Detect delimiter (tsv vs csv)
-        sep = "\t" if file_path.suffix == ".tsv" else ","
-        df = pd.read_csv(file_path, sep=sep)
-    else:
-        df = data_source.copy()
+    y = df[dv].values
 
-    # Apply data filtering if requested
-    if apply_filtering:
-        df, _ = filter_mushra_data(df)
+    # Construct OLS endog and exog from string using patsy sum-to-zero contrasts
+    within_terms = [f"C({i}, Sum)" for i in within]
+    subject_term = f"C({subject}, Sum)"
+    factors = [*within_terms, subject_term]
+    mgr = FormulaManager()
+    x = mgr.get_matrices("*".join(factors), data=df, pandas=False)
+    term_slices = mgr.get_term_name_slices(x)
+    for key in term_slices:
+        ind = np.array([False] * x.shape[1])
+        ind[term_slices[key]] = True
+        term_slices[key] = np.array(ind)
+    term_exclude = [":".join(factors)]
+    ind = _not_slice(term_slices, term_exclude, x.shape[1])
+    x = x[:, ind]
 
-    # Exclude reference stimulus ratings for ANOVA
-    if "rating_stimulus" in df.columns:
-        df = df[df["rating_stimulus"] != "reference"].copy()
+    # Fit full OLS model
+    model = OLS(y, x)
+    results = model.fit()
+    if model.rank < x.shape[1]:
+        raise ValueError("Independent variables are collinear.")
+    for i in term_exclude:
+        term_slices.pop(i)
+    for key in term_slices:
+        term_slices[key] = term_slices[key][ind]
+    params = results.params
+    df_resid = results.df_resid
+    ssr = results.ssr
 
-    # Drop training trials if not already dropped
-    if "trial_id" in df.columns:
-        df = df[df["trial_id"] != "training"].copy()
-        # Separate trial_id into modulation, feature, source (e.g. 'amp_brightness_real')
-        split_cols = df["trial_id"].str.split("_", expand=True)
-        if split_cols.shape[1] >= 3:
-            df["modulation"] = split_cols[0]
-            df["feature"] = split_cols[1]
-            df["source"] = split_cols[2]
+    # Calculate Subject Sum of Squares
+    subj_key = subject_term
+    ssr_subj, _ = _ssr_reduced_model(y, x, term_slices, params, [subj_key])
+    ss_subject = ssr_subj - ssr
 
-    # Map conditions to amount_group: Low (conditions a/b) vs High (conditions c/d)
-    if "amount_group" not in df.columns and "rating_stimulus" in df.columns:
-        cond_map = {
-            "condition_a": "Low",
-            "condition_b": "Low",
-            "condition_c": "High",
-            "condition_d": "High",
-        }
-        df["amount_group"] = df["rating_stimulus"].map(cond_map)
+    records = []
+    all_ss_error = 0.0
+    for key in term_slices:
+        if subject not in str(key) and str(key) not in ("Intercept", "1"):
+            ssr1, df_resid1 = _ssr_reduced_model(y, x, term_slices, params, [key])
+            df1 = df_resid1 - df_resid
+            ss_effect = ssr1 - ssr
+            msm = ss_effect / df1
 
-    return df
+            err_key = str(key) + ":" + subject_term
+            if err_key in term_slices:
+                ssr_err, df_err_res = _ssr_reduced_model(
+                    y, x, term_slices, params, [err_key]
+                )
+                df2 = df_err_res - df_resid
+                ss_error = ssr_err - ssr
+                mse = ss_error / df2
+            else:
+                df2 = df_resid
+                ss_error = ssr
+                mse = ssr / df_resid
+
+            all_ss_error += ss_error
+            F = msm / mse if mse > 0 else np.nan
+            p = stats.f.sf(F, df1, df2) if not np.isnan(F) else np.nan
+            term = str(key).replace("C(", "").replace(", Sum)", "")
+            records.append(
+                {
+                    "Source": term,
+                    "SS": ss_effect,
+                    "DF1": df1,
+                    "DF2": df2,
+                    "MS": msm,
+                    "F": F,
+                    "p_unc": p,
+                    "ss_error": ss_error,
+                }
+            )
+
+    table = pd.DataFrame(records)
+    # Partial eta-squared: np2 = (F * DF1) / (F * DF1 + DF2)
+    table["np2"] = (table["F"] * table["DF1"]) / (
+        table["F"] * table["DF1"] + table["DF2"]
+    )
+    # Generalized eta-squared: ng2 = SS_effect / (SS_effect + SS_subject + sum(all_error_SS))
+    denom_ges = ss_subject + all_ss_error
+    table["ng2"] = table["SS"] / (table["SS"] + denom_ges)
+
+    col_order = ["Source", "SS", "DF1", "DF2", "MS", "F", "p_unc", "np2", "ng2"]
+    return table[col_order]
 
 
 def _filter_balanced_subjects(
@@ -94,15 +147,79 @@ def _filter_balanced_subjects(
     return df[df[subject_col].isin(complete_subjects)].copy()
 
 
+def compute_anova_4way_unpooled(
+    df: pd.DataFrame,
+    dv: str = "mean_rating",
+    subject: str = "session_uuid",
+) -> pd.DataFrame:
+    """4-way Repeated-Measures ANOVA (unpooled): modulation x feature x source x rating_stimulus (4 amounts).
+
+    Uses all 4 individual stimulus condition ratings directly (DF1=3 for amount), without
+    dichotomizing into Low vs High groups.
+    Returns a DataFrame with F, p_unc, np2 (partial eta-squared), and ng2 (generalized eta-squared).
+    """
+    log.info(
+        "Computing 4-way Repeated-Measures ANOVA (unpooled: modulation x feature x source x rating_stimulus)..."
+    )
+    mod_avg_4way_unpooled = (
+        df.groupby(
+            [subject, "modulation", "feature", "source", "rating_stimulus"],
+            as_index=False,
+        )["rating_score"]
+        .mean()
+        .rename(columns={"rating_score": dv})
+    )
+
+    within = ["modulation", "feature", "source", "rating_stimulus"]
+    mod_avg_bal = _filter_balanced_subjects(mod_avg_4way_unpooled, subject, within, dv)
+
+    return compute_rm_anova_with_effect_sizes(
+        mod_avg_bal, dv=dv, subject=subject, within=within
+    )
+
+
+def compute_anova_4way_pooled(
+    df: pd.DataFrame,
+    dv: str = "mean_rating",
+    subject: str = "session_uuid",
+) -> pd.DataFrame:
+    """4-way Repeated-Measures ANOVA (pooled): modulation x feature x source x amount_group (Low vs High).
+
+    Equivalent to R:
+        anova_data_4way <- plot_data_grouped %>% group_by(session_uuid, modulation, feature, source, amount_group) ...
+        anova_results_4way
+    Returns a DataFrame with F, p_unc, np2 (partial eta-squared), and ng2 (generalized eta-squared).
+    """
+    log.info(
+        "Computing 4-way Repeated-Measures ANOVA (pooled: modulation x feature x source x amount_group)..."
+    )
+    df_valid = df.dropna(subset=["amount_group"])
+    mod_avg_4way = (
+        df_valid.groupby(
+            [subject, "modulation", "feature", "source", "amount_group"], as_index=False
+        )["rating_score"]
+        .mean()
+        .rename(columns={"rating_score": dv})
+    )
+
+    within = ["modulation", "feature", "source", "amount_group"]
+    mod_avg_bal = _filter_balanced_subjects(mod_avg_4way, subject, within, dv)
+
+    return compute_rm_anova_with_effect_sizes(
+        mod_avg_bal, dv=dv, subject=subject, within=within
+    )
+
+
 def compute_anova_3way(
     df: pd.DataFrame,
     dv: str = "mean_rating",
     subject: str = "session_uuid",
-) -> AnovaRM:
+) -> pd.DataFrame:
     """3-way Repeated-Measures ANOVA: modulation x feature x source.
 
     Equivalent to R:
         mod_avg %>% anova_test(dv = mean_rating, wid = session_uuid, within = c(modulation, feature, source))
+    Returns a DataFrame with F, p_unc, np2 (partial eta-squared), and ng2 (generalized eta-squared).
     """
     log.info(
         "Computing 3-way Repeated-Measures ANOVA (modulation x feature x source)..."
@@ -118,19 +235,24 @@ def compute_anova_3way(
     within = ["modulation", "feature", "source"]
     mod_avg_bal = _filter_balanced_subjects(mod_avg, subject, within, dv)
 
-    aov_3way = AnovaRM(mod_avg_bal, depvar=dv, subject=subject, within=within).fit()
-    return aov_3way
+    return compute_rm_anova_with_effect_sizes(
+        mod_avg_bal, dv=dv, subject=subject, within=within
+    )
 
 
 def compute_anova_2way_modulation_feature(
     df: pd.DataFrame,
     dv: str = "mean_rating",
     subject: str = "session_uuid",
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """2-way Repeated-Measures ANOVA: modulation x feature.
 
     Equivalent to R:
         mod_avg_2way %>% anova_test(dv = mean_rating, wid = session_uuid, within = c(modulation, feature))
+    Computes ANOVA using both Pingouin (pg.rm_anova) and the custom helper function
+    (compute_rm_anova_with_effect_sizes) for comparison.
+    Returns:
+        tuple of (aov_pingouin, aov_helper)
     """
     log.info("Computing 2-way Repeated-Measures ANOVA (modulation x feature)...")
     mod_avg_2way = (
@@ -142,25 +264,32 @@ def compute_anova_2way_modulation_feature(
     within = ["modulation", "feature"]
     mod_avg_bal = _filter_balanced_subjects(mod_avg_2way, subject, within, dv)
 
-    aov_2way = pg.rm_anova(
+    aov_pg = pg.rm_anova(
         data=mod_avg_bal,
         dv=dv,
         within=within,
         subject=subject,
         detailed=True,
     )
-    return aov_2way
+    aov_helper = compute_rm_anova_with_effect_sizes(
+        mod_avg_bal, dv=dv, subject=subject, within=within
+    )
+    return aov_pg, aov_helper
 
 
 def compute_anova_2way_modulation_amount(
     df: pd.DataFrame,
     dv: str = "mean_rating",
     subject: str = "session_uuid",
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """2-way Repeated-Measures ANOVA: modulation x amount_group (Low vs High).
 
     Equivalent to R:
         anova_results_2way <- mod_avg_2way %>% anova_test(dv = mean_rating, wid = session_uuid, within = c(modulation, amount_group))
+    Computes ANOVA using both Pingouin (pg.rm_anova) and the custom helper function
+    (compute_rm_anova_with_effect_sizes) for comparison.
+    Returns:
+        tuple of (aov_pingouin, aov_helper)
     """
     log.info("Computing 2-way Repeated-Measures ANOVA (modulation x amount_group)...")
     df_valid = df.dropna(subset=["amount_group"])
@@ -175,44 +304,17 @@ def compute_anova_2way_modulation_amount(
     within = ["modulation", "amount_group"]
     mod_avg_bal = _filter_balanced_subjects(mod_avg_amount, subject, within, dv)
 
-    aov_amount = pg.rm_anova(
+    aov_pg = pg.rm_anova(
         data=mod_avg_bal,
         dv=dv,
         within=within,
         subject=subject,
         detailed=True,
     )
-    return aov_amount
-
-
-def compute_anova_4way(
-    df: pd.DataFrame,
-    dv: str = "mean_rating",
-    subject: str = "session_uuid",
-) -> AnovaRM:
-    """4-way Repeated-Measures ANOVA: modulation x feature x source x amount_group.
-
-    Equivalent to R:
-        anova_data_4way <- plot_data_grouped %>% group_by(session_uuid, modulation, feature, source, amount_group) ...
-        anova_results_4way
-    """
-    log.info(
-        "Computing 4-way Repeated-Measures ANOVA (modulation x feature x source x amount_group)..."
+    aov_helper = compute_rm_anova_with_effect_sizes(
+        mod_avg_bal, dv=dv, subject=subject, within=within
     )
-    df_valid = df.dropna(subset=["amount_group"])
-    mod_avg_4way = (
-        df_valid.groupby(
-            [subject, "modulation", "feature", "source", "amount_group"], as_index=False
-        )["rating_score"]
-        .mean()
-        .rename(columns={"rating_score": dv})
-    )
-
-    within = ["modulation", "feature", "source", "amount_group"]
-    mod_avg_bal = _filter_balanced_subjects(mod_avg_4way, subject, within, dv)
-
-    aov_4way = AnovaRM(mod_avg_bal, depvar=dv, subject=subject, within=within).fit()
-    return aov_4way
+    return aov_pg, aov_helper
 
 
 def compute_pairwise_posthocs(
@@ -317,39 +419,96 @@ def compute_normality_tests(
 
 def run_all_anovas(
     data_source: Union[str, Path, pd.DataFrame],
-    apply_filtering: bool = True,
 ):
-    """Execute all ANOVA analyses from MushraDataAnalysis.R and print summaries."""
-    df = prepare_mushra_data(data_source, apply_filtering=apply_filtering)
+    """Execute all ANOVA analyses from MushraDataAnalysis.R and print summaries.
 
-    log.info("\n" + "=" * 65)
-    log.info(" 1. THREE-WAY REPEATED MEASURES ANOVA (modulation x feature x source)")
-    log.info("=" * 65)
-    aov_3way = compute_anova_3way(df)
-    log.info(aov_3way)
+    Assumes the input TSV/CSV dataset has already been cleaned and quality-filtered.
+    Extracts within-subject factors (modulation, feature, source, amount_group) if not already present.
+    """
+    if isinstance(data_source, (str, Path)):
+        file_path = Path(data_source).expanduser().resolve()
+        log.info(f"Loading prepared data from {file_path}")
+        sep = "\t" if file_path.suffix == ".tsv" else ","
+        df = pd.read_csv(file_path, sep=sep)
+    else:
+        df = data_source.copy()
 
-    log.info("\n" + "=" * 65)
-    log.info(" 2. TWO-WAY REPEATED MEASURES ANOVA (modulation x feature)")
-    log.info("=" * 65)
-    aov_2way_mf = compute_anova_2way_modulation_feature(df)
-    log.info(aov_2way_mf.to_string(index=False))
+    # Exclude reference stimulus ratings for ANOVA if present
+    if "rating_stimulus" in df.columns:
+        df = df[df["rating_stimulus"] != "reference"].copy()
 
-    log.info("\n" + "=" * 65)
-    log.info(" 3. TWO-WAY REPEATED MEASURES ANOVA (modulation x amount_group)")
-    log.info("=" * 65)
-    aov_2way_ma = compute_anova_2way_modulation_amount(df)
-    log.info(aov_2way_ma.to_string(index=False))
+    if "trial_id" in df.columns:
+        # Separate trial_id into modulation, feature, source if not already present
+        if "modulation" not in df.columns:
+            split_cols = df["trial_id"].str.split("_", expand=True)
+            if split_cols.shape[1] >= 3:
+                df["modulation"] = split_cols[0]
+                df["feature"] = split_cols[1]
+                df["source"] = split_cols[2]
+
+    # Map conditions to amount_group: Low (conditions a/b) vs High (conditions c/d) if not already present
+    if "amount_group" not in df.columns and "rating_stimulus" in df.columns:
+        cond_map = {
+            "condition_a": "Low",
+            "condition_b": "Low",
+            "condition_c": "High",
+            "condition_d": "High",
+        }
+        df["amount_group"] = df["rating_stimulus"].map(cond_map)
 
     log.info("\n" + "=" * 65)
     log.info(
-        " 4. FOUR-WAY REPEATED MEASURES ANOVA (modulation x feature x source x amount_group)"
+        " 1. FOUR-WAY REPEATED MEASURES ANOVA (modulation x feature x source x rating_stimulus [UNPOOLED])"
     )
     log.info("=" * 65)
-    aov_4way = compute_anova_4way(df)
-    log.info(aov_4way)
+    aov_4way_unpooled = compute_anova_4way_unpooled(df)
+    log.info("\n" + aov_4way_unpooled.to_string(index=False))
 
     log.info("\n" + "=" * 65)
-    log.info(" 5. POST-HOC PAIRWISE TESTS (BONFERRONI)")
+    log.info(
+        " 2. FOUR-WAY REPEATED MEASURES ANOVA (modulation x feature x source x amount_group [POOLED])"
+    )
+    log.info("=" * 65)
+    aov_4way = compute_anova_4way_pooled(df)
+    log.info("\n" + aov_4way.to_string(index=False))
+
+
+
+
+    log.info("\n" + "=" * 65)
+    log.info(" 3. THREE-WAY REPEATED MEASURES ANOVA (modulation x feature x source)")
+    log.info("=" * 65)
+    aov_3way = compute_anova_3way(df)
+    log.info("\n" + aov_3way.to_string(index=False))
+
+    log.info("\n" + "=" * 65)
+    log.info(" 4. TWO-WAY REPEATED MEASURES ANOVA (modulation x feature)")
+    log.info("=" * 65)
+    aov_2way_mf_pg, aov_2way_mf_helper = compute_anova_2way_modulation_feature(df)
+    log.info(
+        "\n[Pingouin (pg.rm_anova, detailed=True)]:\n"
+        + aov_2way_mf_pg.to_string(index=False)
+    )
+    log.info(
+        "\n[Helper Function (compute_rm_anova_with_effect_sizes)]:\n"
+        + aov_2way_mf_helper.to_string(index=False)
+    )
+
+    log.info("\n" + "=" * 65)
+    log.info(" 5. TWO-WAY REPEATED MEASURES ANOVA (modulation x amount_group)")
+    log.info("=" * 65)
+    aov_2way_ma_pg, aov_2way_ma_helper = compute_anova_2way_modulation_amount(df)
+    log.info(
+        "\n[Pingouin (pg.rm_anova, detailed=True)]:\n"
+        + aov_2way_ma_pg.to_string(index=False)
+    )
+    log.info(
+        "\n[Helper Function (compute_rm_anova_with_effect_sizes)]:\n"
+        + aov_2way_ma_helper.to_string(index=False)
+    )
+
+    log.info("\n" + "=" * 65)
+    log.info(" 6. POST-HOC PAIRWISE TESTS (BONFERRONI)")
     log.info("=" * 65)
     posthocs = compute_pairwise_posthocs(df)
     log.info("\n[Post-hoc: Modulation]")
@@ -359,25 +518,19 @@ def run_all_anovas(
 
 
 if __name__ == "__main__":
-    data_path = (
-        Path(__file__).resolve().parent.parent
-        / "data"
-        / "listening_test_responses_preprocessed.tsv"
+    repo_root = Path(__file__).resolve().parent.parent
+    default_data_path = (
+        repo_root / "data" / "listening_test_responses_postprocessed.tsv"
     )
 
     parser = argparse.ArgumentParser(
-        description="Run ANOVA analyses on MUSHRA listening test data."
+        description="Run ANOVA analyses on prepared MUSHRA listening test data."
     )
     parser.add_argument(
         "data_path",
         nargs="?",
-        default=str(data_path),
-        help=f"Path to the MUSHRA data file (tsv or csv; default: {data_path})",
-    )
-    parser.add_argument(
-        "--no-filter",
-        action="store_true",
-        help="Disable quality filtering (unsuitable devices, bad trials, etc.)",
+        default=str(default_data_path),
+        help=f"Path to prepared MUSHRA data file (tsv or csv; default: {default_data_path})",
     )
     args = parser.parse_args()
 
@@ -386,4 +539,4 @@ if __name__ == "__main__":
         parser.print_help()
         sys.exit(1)
 
-    run_all_anovas(args.data_path, apply_filtering=not args.no_filter)
+    run_all_anovas(args.data_path)

@@ -320,7 +320,8 @@ if __name__ == "__main__":
     # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_clap2.tsv")
     # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_encodec48.tsv")
     # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_panns_wavegram_logmel.tsv")
-    tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_scat1d.tsv")
+    # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_scat1d.tsv")
+    tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_jtfs.tsv")
     ref_match_phase = args.ref_match_phase
     sr = 44100
     target_lufs = -18
@@ -367,11 +368,11 @@ if __name__ == "__main__":
         #     PANNsEmbeddingLoss(variant="wavegram-logmel", in_sr=sr),
         # ),
         # ("scat1d", Scat1DLoss(shape=176400, J=12, Q1=8, Q2=2, T=None, max_order=2, p=2)),
-        ("scat1d_log1p", Scat1DLoss(shape=176400, J=12, Q1=8, Q2=2, T=None, max_order=2, p=2, use_rho_log1p=True)),
+        # ("scat1d_log1p", Scat1DLoss(shape=176400, J=12, Q1=8, Q2=2, T=None, max_order=2, p=2, use_rho_log1p=True)),
         # ("scat1d_cqt", Scat1DLoss(shape=176400, J=12, Q1=8, Q2=2, T=1, max_order=1, p=2)),
         # ("jtfs", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=3, Q_fr=2, T=None, F=None, format_="joint", p=2)),
         # ("jtfs2", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=5, Q_fr=2, T=2048, F=1, format_="joint", p=2, use_rho_log1p=True)),
-        # ("jtfs_log1p", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=5, Q_fr=2, T=None, F=None, format_="joint", p=2, use_rho_log1p=True)),
+        ("jtfs_log1p", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=5, Q_fr=2, T=None, F=None, format_="joint", p=2, use_rho_log1p=True)),
     ]
     wavetables = DEFAULT_WAVETABLES
     mod_sig_references = [

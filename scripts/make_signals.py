@@ -202,7 +202,7 @@ if __name__ == "__main__":
     sweep_dur_sec = 4.0
     target_lufs = -18
     fade_samples = 256
-    n_phases = 28
+    n_phases = 23
 
     # freq_vals = []
     freq_vals = [0.25, 0.5, 1.0, 2.0, 4.0]
