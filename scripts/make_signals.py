@@ -1,7 +1,7 @@
 import glob
 import logging
 import os
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -146,6 +146,54 @@ def plot_mod_signals(
     plt.close(fig)
 
 
+def render_and_save_sweep(
+    wt: T,
+    wt_name: str,
+    stim_tag: str,
+    mod_sig: T,
+    lut: Optional[np.ndarray],
+    period_sec: float,
+    n_phases: int,
+    sr: int,
+    sweep_dur_sec: float,
+    target_lufs: float,
+    fade_in: np.ndarray,
+    fade_out: np.ndarray,
+    fade_samples: int,
+    save_dir: str,
+) -> None:
+    """Warp modulation signal and render N phase-shifted versions of the sweep."""
+    if lut is not None:
+        mod_sig_warped = np.interp(
+            mod_sig.numpy(), np.linspace(0, 1, len(lut)), lut
+        )
+    else:
+        mod_sig_warped = mod_sig.numpy()
+
+    period_samples = int(round(period_sec * sr))
+    for phase_idx in range(n_phases):
+        shift = int(round(phase_idx * period_samples / n_phases))
+        rolled_mod_sig = np.roll(mod_sig_warped, shift)
+
+        sweep = create_wavetable_sweep(
+            wt, sr=sr, duration=sweep_dur_sec, mod_signal=rolled_mod_sig
+        )
+        sweep_norm, loudness, gain = loudness_normalize(sweep, sr, target_lufs)
+
+        sweep_norm[:fade_samples] *= fade_in
+        sweep_norm[-fade_samples:] *= fade_out
+
+        phase_suffix = f"__phase_{phase_idx}_{n_phases}" if n_phases > 1 else ""
+        save_name = f"{wt_name}__{stim_tag}_{target_lufs}lufs{phase_suffix}.wav"
+        save_path = os.path.join(save_dir, save_name)
+        torchaudio.save(
+            save_path,
+            tr.tensor(sweep_norm).unsqueeze(0).expand(2, -1).float(),
+            sr,
+        )
+        log.info(f"Saved {save_name} (loudness={loudness:.1f}, gain={gain:.1f}dB)")
+
+
 if __name__ == "__main__":
     wavetable_dir = os.path.join("../data/listening_test")
     save_dir = "../out/"
@@ -154,6 +202,7 @@ if __name__ == "__main__":
     sweep_dur_sec = 4.0
     target_lufs = -18
     fade_samples = 256
+    n_phases = 28
 
     # freq_vals = []
     freq_vals = [0.25, 0.5, 1.0, 2.0, 4.0]
@@ -177,6 +226,7 @@ if __name__ == "__main__":
     fade_in = np.linspace(0.0, 1.0, fade_samples)
     fade_out = np.linspace(1.0, 0.0, fade_samples)
 
+    os.makedirs(save_dir, exist_ok=True)
     os.makedirs(plot_dir, exist_ok=True)
     for mod_type, amounts, mod_freq in [
         ("amp", amp_vals, amp_freq),
@@ -211,85 +261,65 @@ if __name__ == "__main__":
 
         for freq in freq_vals:
             mod_sig = make_mod_sig("freq", freq, n_samples, sr)
-            if lut is not None:
-                mod_sig_warped = np.interp(
-                    mod_sig.numpy(), np.linspace(0, 1, len(lut)), lut
-                )
-            else:
-                mod_sig_warped = mod_sig.numpy()
-            sweep = create_wavetable_sweep(
-                wt, sr=sr, duration=sweep_dur_sec, mod_signal=mod_sig_warped
+            period_sec = 1.0 / freq
+            render_and_save_sweep(
+                wt=wt,
+                wt_name=wt_name,
+                stim_tag=f"freq_{freq:.2f}hz",
+                mod_sig=mod_sig,
+                lut=lut,
+                period_sec=period_sec,
+                n_phases=n_phases,
+                sr=sr,
+                sweep_dur_sec=sweep_dur_sec,
+                target_lufs=target_lufs,
+                fade_in=fade_in,
+                fade_out=fade_out,
+                fade_samples=fade_samples,
+                save_dir=save_dir,
             )
-            sweep_norm, loudness, gain = loudness_normalize(sweep, sr, target_lufs)
-
-            sweep_norm[:fade_samples] *= fade_in
-            sweep_norm[-fade_samples:] *= fade_out
-
-            save_name = f"{wt_name}__freq_{freq:.2f}hz_{target_lufs}lufs.wav"
-            save_path = os.path.join(save_dir, save_name)
-            torchaudio.save(
-                save_path,
-                tr.tensor(sweep_norm).unsqueeze(0).expand(2, -1).float(),
-                sr,
-            )
-            log.info(f"Saved {save_name} (loudness={loudness:.1f}, gain={gain:.1f}dB)")
 
         for amp in amp_vals:
             mod_sig = make_mod_sig(
                 "amp", amp, n_samples, sr, amp_freq, amp_center_val=amp_center_val
             )
-            if lut is not None:
-                mod_sig_warped = np.interp(
-                    mod_sig.numpy(), np.linspace(0, 1, len(lut)), lut
-                )
-            else:
-                mod_sig_warped = mod_sig.numpy()
-
-            sweep = create_wavetable_sweep(
-                wt, sr=sr, duration=sweep_dur_sec, mod_signal=mod_sig_warped
+            period_sec = 1.0 / amp_freq
+            render_and_save_sweep(
+                wt=wt,
+                wt_name=wt_name,
+                stim_tag=f"amp_{amp_freq:.2f}hz_{amp:.2f}",
+                mod_sig=mod_sig,
+                lut=lut,
+                period_sec=period_sec,
+                n_phases=n_phases,
+                sr=sr,
+                sweep_dur_sec=sweep_dur_sec,
+                target_lufs=target_lufs,
+                fade_in=fade_in,
+                fade_out=fade_out,
+                fade_samples=fade_samples,
+                save_dir=save_dir,
             )
-            sweep_norm, loudness, gain = loudness_normalize(sweep, sr, target_lufs)
-
-            sweep_norm[:fade_samples] *= fade_in
-            sweep_norm[-fade_samples:] *= fade_out
-
-            save_name = (
-                f"{wt_name}__amp_{amp_freq:.2f}hz_{amp:.2f}_{target_lufs}lufs.wav"
-            )
-            save_path = os.path.join(save_dir, save_name)
-            torchaudio.save(
-                save_path,
-                tr.tensor(sweep_norm).unsqueeze(0).expand(2, -1).float(),
-                sr,
-            )
-            log.info(f"Saved {save_name} (loudness={loudness:.1f}, gain={gain:.1f}dB)")
 
         for reg in reg_vals:
             mod_sig = make_mod_sig(
                 "reg", reg, n_samples, sr, reg_freq, reg_seed=reg_seed
             )
-            if lut is not None:
-                mod_sig_warped = np.interp(
-                    mod_sig.numpy(), np.linspace(0, 1, len(lut)), lut
-                )
-            else:
-                mod_sig_warped = mod_sig.numpy()
-
-            sweep = create_wavetable_sweep(
-                wt, sr=sr, duration=sweep_dur_sec, mod_signal=mod_sig_warped
+            # period_sec = 1.0 / reg_freq if reg == 0.0 else sweep_dur_sec
+            period_sec = 1.0 / reg_freq
+            render_and_save_sweep(
+                wt=wt,
+                wt_name=wt_name,
+                stim_tag=f"reg_{reg_freq:.2f}hz_{reg:.3f}",
+                mod_sig=mod_sig,
+                lut=lut,
+                period_sec=period_sec,
+                n_phases=n_phases,
+                sr=sr,
+                sweep_dur_sec=sweep_dur_sec,
+                target_lufs=target_lufs,
+                fade_in=fade_in,
+                fade_out=fade_out,
+                fade_samples=fade_samples,
+                save_dir=save_dir,
             )
-            sweep_norm, loudness, gain = loudness_normalize(sweep, sr, target_lufs)
-
-            sweep_norm[:fade_samples] *= fade_in
-            sweep_norm[-fade_samples:] *= fade_out
-
-            save_name = (
-                f"{wt_name}__reg_{reg_freq:.2f}hz_{reg:.3f}_{target_lufs}lufs.wav"
-            )
-            save_path = os.path.join(save_dir, save_name)
-            torchaudio.save(
-                save_path,
-                tr.tensor(sweep_norm).unsqueeze(0).expand(2, -1).float(),
-                sr,
-            )
-            log.info(f"Saved {save_name} (loudness={loudness:.1f}, gain={gain:.1f}dB)")

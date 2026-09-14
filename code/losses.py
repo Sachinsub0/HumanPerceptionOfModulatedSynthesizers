@@ -205,9 +205,10 @@ class ClapEmbeddingLoss(EmbeddingLoss):
         return self.model.args.sampling_rate
 
     def get_model_n_samples(self) -> int:
-        dur = self.model.args.duration
-        n_samples = dur * self.get_model_sr()
-        return n_samples
+        # dur = self.model.args.duration
+        # n_samples = dur * self.get_model_sr()
+        # return n_samples
+        return -1
 
     def get_embedding(self, x: T) -> T:
         x_emb, _ = self.model.clap.audio_encoder(x)

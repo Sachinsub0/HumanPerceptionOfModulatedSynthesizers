@@ -51,7 +51,9 @@ class ReadOnlyTensorDict(nn.Module):
 def parse_amount(mod_sig: str) -> Tuple[str, float, str]:
     """Split a mod signal name around its last number, which is the amount, e.g.
     "amp_1.00hz_0.10" -> ("amp_1.00hz_", 0.10, "") and
-    "freq_0.25hz" -> ("freq_", 0.25, "hz")."""
+    "freq_0.25hz" -> ("freq_", 0.25, "hz").
+    Strips optional trailing __phase_... if present."""
+    mod_sig = re.sub(r"__phase_\d+_\d+$", "", mod_sig)
     match = re.match(r"^(.*?)(\d+(?:\.\d+)?)(\D*)$", mod_sig)
     assert match is not None, f"Could not find an amount in {mod_sig}"
     return match.group(1), float(match.group(2)), match.group(3)
@@ -62,17 +64,44 @@ def find_variants(
 ) -> List[str]:
     """Find all samples of wt_name whose mod signal matches mod_sig apart from
     its amount, including mod_sig itself so that the trivial self distance is
-    also measured (not every distance function is guaranteed to return 0)."""
+    also measured (not every distance function is guaranteed to return 0).
+    Supports both unphased and phase-shifted variants."""
     prefix, _, unit = parse_amount(mod_sig)
-    pattern = os.path.join(samples_dir, f"{wt_name}__{prefix}*{unit}{suffix}")
+    clean_suffix = suffix[:-4] if suffix.endswith(".wav") else suffix
+    pattern = os.path.join(samples_dir, f"{wt_name}__{prefix}*{unit}*.wav")
     paths = []
     for path in sorted(glob.glob(pattern)):
-        name = os.path.basename(path)[: -len(suffix)]
+        filename = os.path.basename(path)
+        name = filename[:-4] if filename.endswith(".wav") else filename
+        name = re.sub(r"__phase_\d+_\d+$", "", name)
+        if clean_suffix and name.endswith(clean_suffix):
+            name = name[: -len(clean_suffix)]
         variant = name[len(f"{wt_name}__") :]
-        variant_prefix, _, variant_unit = parse_amount(variant)
+        try:
+            variant_prefix, _, variant_unit = parse_amount(variant)
+        except AssertionError:
+            continue
         if (variant_prefix, variant_unit) != (prefix, unit):
             continue
         paths.append(path)
+
+    def _sort_key(p: str) -> Tuple[float, int]:
+        fname = os.path.basename(p)
+        pm = re.search(r"__phase_(\d+)_\d+", fname)
+        pidx = int(pm.group(1)) if pm else 0
+        cname = re.sub(r"__phase_\d+_\d+", "", fname)
+        if clean_suffix and cname.endswith(f"{clean_suffix}.wav"):
+            cname = cname[: -len(f"{clean_suffix}.wav")]
+        elif cname.endswith(".wav"):
+            cname = cname[:-4]
+        cname = cname[len(f"{wt_name}__") :]
+        try:
+            _, amt, _ = parse_amount(cname)
+        except AssertionError:
+            amt = 0.0
+        return (amt, pidx)
+
+    paths.sort(key=_sort_key)
     return paths
 
 
