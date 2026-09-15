@@ -129,28 +129,70 @@ def compute_rm_anova_with_effect_sizes(
     return table[col_order]
 
 
+def _resolve_input_col(df: pd.DataFrame, dv: str, input_col: str | None = None) -> str:
+    """Resolve the column to aggregate or measure.
+
+    If input_col is explicitly specified, returns it (raising KeyError if missing).
+    Otherwise, defaults to 'rating_score' if present in df.
+    Otherwise, falls back to dv if present in df.
+    Raises KeyError if neither is found in df.
+    """
+    if input_col is not None:
+        if input_col not in df.columns:
+            raise KeyError(
+                f"Specified input column '{input_col}' not found in DataFrame."
+            )
+        return input_col
+    if "rating_score" in df.columns:
+        return "rating_score"
+    if dv in df.columns:
+        return dv
+    raise KeyError(
+        f"Neither default input column 'rating_score' nor dv '{dv}' found in DataFrame columns: {list(df.columns)}"
+    )
+
+
 def _filter_balanced_subjects(
     df: pd.DataFrame, subject_col: str, group_cols: list[str], dv: str
 ) -> pd.DataFrame:
-    """Filter to subjects that have complete data across all within-subject cells."""
-    cell_counts = df.groupby(subject_col)[dv].count()
-    expected_cells = 1
-    for col in group_cols:
-        expected_cells *= df[col].nunique()
+    """Filter to subjects that have complete and balanced data across all within-subject cells.
 
-    complete_subjects = cell_counts[cell_counts == expected_cells].index
-    if len(complete_subjects) < len(cell_counts):
+    Verifies that each retained subject has exactly 1 valid observation per
+    unique combination of group_cols across the full within-subject factorial design.
+    """
+    df_valid = df.dropna(subset=[*group_cols, dv])
+    if df_valid.empty:
+        return df_valid.copy()
+
+    # Total expected cells across the full factorial combinations of group_cols
+    expected_cells = int(np.prod([df_valid[col].nunique() for col in group_cols]))
+
+    # Count observations per (subject, *group_cols) cell
+    cell_obs = df_valid.groupby([subject_col, *group_cols])[dv].count()
+
+    # A subject is balanced if:
+    # 1. Exactly expected_cells unique combinations of group_cols are present
+    # 2. Every combination has exactly 1 observation (no duplicate combinations)
+    cell_sizes = cell_obs.groupby(level=subject_col).size()
+    cell_all_ones = (cell_obs == 1).groupby(level=subject_col).all()
+
+    balanced_mask = (cell_sizes == expected_cells) & cell_all_ones
+    complete_subjects = balanced_mask[balanced_mask].index
+
+    all_subjects = df[subject_col].dropna().unique()
+    if len(complete_subjects) < len(all_subjects):
         log.info(
-            f"Using {len(complete_subjects)} of {len(cell_counts)} subjects "
+            f"Using {len(complete_subjects)} of {len(all_subjects)} subjects "
             f"with complete data for balanced design across {group_cols}."
         )
-    return df[df[subject_col].isin(complete_subjects)].copy()
+    return df_valid[df_valid[subject_col].isin(complete_subjects)].copy()
 
 
 def compute_anova_4way_unpooled(
     df: pd.DataFrame,
     dv: str = "mean_rating",
     subject: str = "session_uuid",
+    input_col: str | None = None,
 ) -> pd.DataFrame:
     """4-way Repeated-Measures ANOVA (unpooled): modulation x feature x source x rating_stimulus (4 amounts).
 
@@ -161,17 +203,21 @@ def compute_anova_4way_unpooled(
     log.info(
         "Computing 4-way Repeated-Measures ANOVA (unpooled: modulation x feature x source x rating_stimulus)..."
     )
+    in_col = _resolve_input_col(df, dv, input_col)
     mod_avg_4way_unpooled = (
         df.groupby(
             [subject, "modulation", "feature", "source", "rating_stimulus"],
             as_index=False,
-        )["rating_score"]
+        )[in_col]
         .mean()
-        .rename(columns={"rating_score": dv})
+        .rename(columns={in_col: dv})
     )
 
     within = ["modulation", "feature", "source", "rating_stimulus"]
     mod_avg_bal = _filter_balanced_subjects(mod_avg_4way_unpooled, subject, within, dv)
+
+    # Save to .tsv for R compatibility if needed
+    mod_avg_bal.to_csv("../out/4_way_data.tsv", sep="\t", index=False)
 
     return compute_rm_anova_with_effect_sizes(
         mod_avg_bal, dv=dv, subject=subject, within=within
@@ -182,6 +228,7 @@ def compute_anova_4way_pooled(
     df: pd.DataFrame,
     dv: str = "mean_rating",
     subject: str = "session_uuid",
+    input_col: str | None = None,
 ) -> pd.DataFrame:
     """4-way Repeated-Measures ANOVA (pooled): modulation x feature x source x amount_group (Low vs High).
 
@@ -193,13 +240,14 @@ def compute_anova_4way_pooled(
     log.info(
         "Computing 4-way Repeated-Measures ANOVA (pooled: modulation x feature x source x amount_group)..."
     )
+    in_col = _resolve_input_col(df, dv, input_col)
     df_valid = df.dropna(subset=["amount_group"])
     mod_avg_4way = (
         df_valid.groupby(
             [subject, "modulation", "feature", "source", "amount_group"], as_index=False
-        )["rating_score"]
+        )[in_col]
         .mean()
-        .rename(columns={"rating_score": dv})
+        .rename(columns={in_col: dv})
     )
 
     within = ["modulation", "feature", "source", "amount_group"]
@@ -214,6 +262,7 @@ def compute_anova_3way(
     df: pd.DataFrame,
     dv: str = "mean_rating",
     subject: str = "session_uuid",
+    input_col: str | None = None,
 ) -> pd.DataFrame:
     """3-way Repeated-Measures ANOVA: modulation x feature x source.
 
@@ -224,12 +273,13 @@ def compute_anova_3way(
     log.info(
         "Computing 3-way Repeated-Measures ANOVA (modulation x feature x source)..."
     )
+    in_col = _resolve_input_col(df, dv, input_col)
     mod_avg = (
         df.groupby(
-            [subject, "trial_id", "modulation", "feature", "source"], as_index=False
-        )["rating_score"]
+            [subject, "modulation", "feature", "source"], as_index=False
+        )[in_col]
         .mean()
-        .rename(columns={"rating_score": dv})
+        .rename(columns={in_col: dv})
     )
 
     within = ["modulation", "feature", "source"]
@@ -244,6 +294,7 @@ def compute_anova_2way_modulation_feature(
     df: pd.DataFrame,
     dv: str = "mean_rating",
     subject: str = "session_uuid",
+    input_col: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """2-way Repeated-Measures ANOVA: modulation x feature.
 
@@ -255,10 +306,11 @@ def compute_anova_2way_modulation_feature(
         tuple of (aov_pingouin, aov_helper)
     """
     log.info("Computing 2-way Repeated-Measures ANOVA (modulation x feature)...")
+    in_col = _resolve_input_col(df, dv, input_col)
     mod_avg_2way = (
-        df.groupby([subject, "modulation", "feature"], as_index=False)["rating_score"]
+        df.groupby([subject, "modulation", "feature"], as_index=False)[in_col]
         .mean()
-        .rename(columns={"rating_score": dv})
+        .rename(columns={in_col: dv})
     )
 
     within = ["modulation", "feature"]
@@ -281,6 +333,7 @@ def compute_anova_2way_modulation_amount(
     df: pd.DataFrame,
     dv: str = "mean_rating",
     subject: str = "session_uuid",
+    input_col: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """2-way Repeated-Measures ANOVA: modulation x amount_group (Low vs High).
 
@@ -292,13 +345,14 @@ def compute_anova_2way_modulation_amount(
         tuple of (aov_pingouin, aov_helper)
     """
     log.info("Computing 2-way Repeated-Measures ANOVA (modulation x amount_group)...")
+    in_col = _resolve_input_col(df, dv, input_col)
     df_valid = df.dropna(subset=["amount_group"])
     mod_avg_amount = (
         df_valid.groupby([subject, "modulation", "amount_group"], as_index=False)[
-            "rating_score"
+            in_col
         ]
         .mean()
-        .rename(columns={"rating_score": dv})
+        .rename(columns={in_col: dv})
     )
 
     within = ["modulation", "amount_group"]
@@ -321,6 +375,7 @@ def compute_pairwise_posthocs(
     df: pd.DataFrame,
     dv: str = "mean_rating",
     subject: str = "session_uuid",
+    input_col: str | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Pairwise post-hoc paired t-tests with Bonferroni correction.
 
@@ -329,18 +384,15 @@ def compute_pairwise_posthocs(
         pairwise_t_test(mean_rating ~ feature, paired = TRUE, p.adjust.method = "bonferroni")
     """
     log.info("Computing pairwise post-hoc tests (Bonferroni adjusted)...")
+    in_col = _resolve_input_col(df, dv, input_col)
 
     # 1. Modulation pairwise comparisons
     mod_means = (
-        df.groupby([subject, "modulation"], as_index=False)["rating_score"]
+        df.groupby([subject, "modulation"], as_index=False)[in_col]
         .mean()
-        .rename(columns={"rating_score": dv})
+        .rename(columns={in_col: dv})
     )
-    comp_subs_mod = mod_means.groupby(subject)["modulation"].nunique()
-    n_mods = mod_means["modulation"].nunique()
-    mod_means_comp = mod_means[
-        mod_means[subject].isin(comp_subs_mod[comp_subs_mod == n_mods].index)
-    ]
+    mod_means_comp = _filter_balanced_subjects(mod_means, subject, ["modulation"], dv)
 
     pw_modulation = pg.pairwise_tests(
         data=mod_means_comp,
@@ -352,15 +404,11 @@ def compute_pairwise_posthocs(
 
     # 2. Feature pairwise comparisons
     feat_means = (
-        df.groupby([subject, "feature"], as_index=False)["rating_score"]
+        df.groupby([subject, "feature"], as_index=False)[in_col]
         .mean()
-        .rename(columns={"rating_score": dv})
+        .rename(columns={in_col: dv})
     )
-    comp_subs_feat = feat_means.groupby(subject)["feature"].nunique()
-    n_feats = feat_means["feature"].nunique()
-    feat_means_comp = feat_means[
-        feat_means[subject].isin(comp_subs_feat[comp_subs_feat == n_feats].index)
-    ]
+    feat_means_comp = _filter_balanced_subjects(feat_means, subject, ["feature"], dv)
 
     pw_feature = pg.pairwise_tests(
         data=feat_means_comp,
@@ -381,6 +429,7 @@ def compute_normality_tests(
     group_by: list[str] | None = None,
     dv: str = "mean_rating",
     subject: str = "session_uuid",
+    input_col: str | None = None,
 ) -> pd.DataFrame:
     """Shapiro-Wilk test for normality across factor combinations.
 
@@ -391,10 +440,11 @@ def compute_normality_tests(
         group_by = ["modulation", "feature", "source"]
 
     log.info(f"Computing Shapiro-Wilk normality tests grouped by {group_by}...")
+    in_col = _resolve_input_col(df, dv, input_col)
     grouped = (
-        df.groupby([subject] + group_by, as_index=False)["rating_score"]
+        df.groupby([subject] + group_by, as_index=False)[in_col]
         .mean()
-        .rename(columns={"rating_score": dv})
+        .rename(columns={in_col: dv})
     )
 
     records = []
@@ -419,6 +469,8 @@ def compute_normality_tests(
 
 def run_all_anovas(
     data_source: Union[str, Path, pd.DataFrame],
+    dv: str = "mean_rating",
+    input_col: str | None = None,
 ):
     """Execute all ANOVA analyses from MushraDataAnalysis.R and print summaries.
 
@@ -461,7 +513,7 @@ def run_all_anovas(
         " 1. FOUR-WAY REPEATED MEASURES ANOVA (modulation x feature x source x rating_stimulus [UNPOOLED])"
     )
     log.info("=" * 65)
-    aov_4way_unpooled = compute_anova_4way_unpooled(df)
+    aov_4way_unpooled = compute_anova_4way_unpooled(df, dv=dv, input_col=input_col)
     log.info("\n" + aov_4way_unpooled.to_string(index=False))
 
     log.info("\n" + "=" * 65)
@@ -469,22 +521,21 @@ def run_all_anovas(
         " 2. FOUR-WAY REPEATED MEASURES ANOVA (modulation x feature x source x amount_group [POOLED])"
     )
     log.info("=" * 65)
-    aov_4way = compute_anova_4way_pooled(df)
+    aov_4way = compute_anova_4way_pooled(df, dv=dv, input_col=input_col)
     log.info("\n" + aov_4way.to_string(index=False))
-
-
-
 
     log.info("\n" + "=" * 65)
     log.info(" 3. THREE-WAY REPEATED MEASURES ANOVA (modulation x feature x source)")
     log.info("=" * 65)
-    aov_3way = compute_anova_3way(df)
+    aov_3way = compute_anova_3way(df, dv=dv, input_col=input_col)
     log.info("\n" + aov_3way.to_string(index=False))
 
     log.info("\n" + "=" * 65)
     log.info(" 4. TWO-WAY REPEATED MEASURES ANOVA (modulation x feature)")
     log.info("=" * 65)
-    aov_2way_mf_pg, aov_2way_mf_helper = compute_anova_2way_modulation_feature(df)
+    aov_2way_mf_pg, aov_2way_mf_helper = compute_anova_2way_modulation_feature(
+        df, dv=dv, input_col=input_col
+    )
     log.info(
         "\n[Pingouin (pg.rm_anova, detailed=True)]:\n"
         + aov_2way_mf_pg.to_string(index=False)
@@ -497,7 +548,9 @@ def run_all_anovas(
     log.info("\n" + "=" * 65)
     log.info(" 5. TWO-WAY REPEATED MEASURES ANOVA (modulation x amount_group)")
     log.info("=" * 65)
-    aov_2way_ma_pg, aov_2way_ma_helper = compute_anova_2way_modulation_amount(df)
+    aov_2way_ma_pg, aov_2way_ma_helper = compute_anova_2way_modulation_amount(
+        df, dv=dv, input_col=input_col
+    )
     log.info(
         "\n[Pingouin (pg.rm_anova, detailed=True)]:\n"
         + aov_2way_ma_pg.to_string(index=False)
@@ -510,7 +563,7 @@ def run_all_anovas(
     log.info("\n" + "=" * 65)
     log.info(" 6. POST-HOC PAIRWISE TESTS (BONFERRONI)")
     log.info("=" * 65)
-    posthocs = compute_pairwise_posthocs(df)
+    posthocs = compute_pairwise_posthocs(df, dv=dv, input_col=input_col)
     log.info("\n[Post-hoc: Modulation]")
     log.info(posthocs["modulation"].to_string(index=False))
     log.info("\n[Post-hoc: Feature]")
@@ -532,6 +585,16 @@ if __name__ == "__main__":
         default=str(default_data_path),
         help=f"Path to prepared MUSHRA data file (tsv or csv; default: {default_data_path})",
     )
+    parser.add_argument(
+        "--dv",
+        default="mean_rating",
+        help="Dependent variable column name for ANOVA (default: mean_rating)",
+    )
+    parser.add_argument(
+        "--input-col",
+        default=None,
+        help="Input rating column to aggregate (default: rating_score if present, else dv)",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.data_path):
@@ -539,4 +602,4 @@ if __name__ == "__main__":
         parser.print_help()
         sys.exit(1)
 
-    run_all_anovas(args.data_path)
+    run_all_anovas(args.data_path, dv=args.dv, input_col=args.input_col)

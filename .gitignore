@@ -568,3 +568,5 @@ scratch.py
 checkpoints/
 ckpt/
 data/
+.Rhistory
+.Rproj.user
