@@ -476,8 +476,7 @@ if __name__ == "__main__":
     repo_root = Path(__file__).resolve().parent.parent
     default_distances_path = repo_root / "data" / "distances.tsv"
     default_mushra_path = (
-        repo_root / "data" / "listening_test_responses_preprocessed.tsv"
-        # repo_root / "data" / "listening_test_responses_preprocessed_prev.tsv"
+        repo_root / "data" / "listening_test_responses_postprocessed.tsv"
     )
 
     parser = argparse.ArgumentParser(
@@ -508,8 +507,8 @@ if __name__ == "__main__":
         "-l",
         nargs="+",
         # default=["all"],
-        # default=["jtfs_log1p", "scat1d_log1p", "vggish", "panns_wavegram_logmel", "clap2", "encodec48", "esr", "mss_rev", "mss_log_lin", "mfcc"],
-        default=["jtfs_log1p", "scat1d_log1p", "vggish", "panns_wavegram_logmel", "clap2", "encodec48", "mss_rev", "mss_log_lin", "mfcc"],
+        # default=["jtfs_log1p", "scat1d_log1p", "vggish", "panns_wavegram_logmel", "clap2", "encodec48k", "encodec24k", "esr", "mss_rev", "mss_log_lin", "mfcc"],
+        default=["jtfs_log1p", "scat1d_log1p", "vggish", "panns_wavegram_logmel", "clap2", "encodec48k", "mss_rev", "mss_log_lin", "mfcc"],
         help=(
             "Specific loss function(s) to evaluate. Accepts multiple names (e.g. -l jtfs_log1p scat1d_log1p), "
             "comma-separated string ('jtfs_log1p,scat1d_log1p'), a Python/JSON list representation, "

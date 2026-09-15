@@ -5,6 +5,7 @@ from typing import Union, Optional, List, Literal
 
 import auraloss
 import scipy
+import torch
 import torch as tr
 import torch.nn as nn
 from msclap import CLAP
@@ -131,6 +132,7 @@ class Scat1DLoss(nn.Module):
 class EmbeddingLoss(ABC, nn.Module):
     def __init__(self, use_time_varying: bool = False, in_sr: int = 44100, p: int = 2):
         super().__init__()
+        assert not use_time_varying
         self.use_time_varying = use_time_varying
         self.in_sr = in_sr
         self.p = p
@@ -152,7 +154,9 @@ class EmbeddingLoss(ABC, nn.Module):
         if model_n_samples == -1:  # Model can handle any number of samples
             return x
         if n_samples < model_n_samples:
+            assert False  # TODO(cm): tmp
             n_repeats = model_n_samples // n_samples + 1
+            # TODO(cm): add a window or fade to avoid discontinuities at the boundaries
             x = x.repeat(1, n_repeats)
         x = x[:, :model_n_samples]
         return x
@@ -248,13 +252,11 @@ class VGGishEmbeddingLoss(EmbeddingLoss):
     def __init__(
         self,
         pretrained: bool = True,
-        postprocess: bool = False,
         in_sr: int = 44100,
         p: int = 2,
         use_time_varying=False,
     ):
         self.pretrained = pretrained
-        self.postprocess = postprocess
         super().__init__(use_time_varying=use_time_varying, in_sr=in_sr, p=p)
         hub_kwargs = {}
         try:
@@ -269,7 +271,7 @@ class VGGishEmbeddingLoss(EmbeddingLoss):
             "harritaylor/torchvggish",
             "vggish",
             pretrained=pretrained,
-            postprocess=postprocess,
+            postprocess=False,
             **hub_kwargs,
         )
         for param in self.parameters():
@@ -284,10 +286,6 @@ class VGGishEmbeddingLoss(EmbeddingLoss):
         return -1
 
     def get_embedding(self, x: T) -> T:
-        squeeze_batch = False
-        if x.ndim == 1:
-            x = x.unsqueeze(0)
-            squeeze_batch = True
         device = next(self.model.parameters()).device
         self.model.device = device
         embs = []
@@ -295,21 +293,51 @@ class VGGishEmbeddingLoss(EmbeddingLoss):
             audio_i = x[i]
             # VGGish expects at least 0.96s (15360 samples at 16kHz)
             if audio_i.size(-1) < 16000:
+                assert False  # TODO(cm): tmp
                 n_repeats = (16000 // audio_i.size(-1)) + 1
                 audio_i = audio_i.repeat(n_repeats)[:16000]
             audio_np = audio_i.detach().cpu().numpy()
             emb_i = self.model(audio_np, 16000)
             embs.append(emb_i.to(device))
         emb = tr.stack(embs, dim=0)
-        if squeeze_batch:
-            emb = emb.squeeze(0)
         return emb
+
+
+class EncodecNoQuantizeModel(EncodecModel):
+    def _encode_frame(
+        self, input_values: torch.Tensor, bandwidth: float
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        length = input_values.shape[-1]
+        duration = length / self.config.sampling_rate
+
+        if (
+            self.config.chunk_length_s is not None
+            and duration > 1e-5 + self.config.chunk_length_s
+        ):
+            raise RuntimeError(
+                f"Duration of frame ({duration}) is longer than chunk {self.config.chunk_length_s}"
+            )
+
+        scale = None
+        if self.config.normalize:
+            mono = torch.sum(input_values, 1, keepdim=True) / input_values.shape[1]
+            scale = mono.pow(2).mean(dim=-1, keepdim=True).sqrt() + 1e-8
+            input_values = input_values / scale
+            scale = scale.view(-1, 1)
+
+        embeddings = self.encoder(input_values)
+        # codes = self.quantizer.encode(embeddings, bandwidth)
+        # codes = codes.transpose(0, 1)
+        # return codes, scale
+        return embeddings, scale
 
 
 class EncodecEmbeddingLoss(EmbeddingLoss):
     def __init__(
         self,
-        model_id: str = "facebook/encodec_48khz",
+        model_id: Literal[
+            "facebook/encodec_48khz", "facebook/encodec_24khz"
+        ] = "facebook/encodec_48khz",
         in_sr: int = 44100,
         p: int = 2,
         use_time_varying=False,
@@ -317,7 +345,7 @@ class EncodecEmbeddingLoss(EmbeddingLoss):
         self.model_id = model_id
         self.model_sr = 48000 if "48khz" in model_id else 24000
         super().__init__(use_time_varying=use_time_varying, in_sr=in_sr, p=p)
-        self.model = EncodecModel.from_pretrained(model_id)
+        self.model = EncodecNoQuantizeModel.from_pretrained(model_id)
         assert self.model_sr == self.model.config.sampling_rate
         self.channels = self.model.config.audio_channels
         for param in self.parameters():
@@ -332,21 +360,27 @@ class EncodecEmbeddingLoss(EmbeddingLoss):
         return -1
 
     def get_embedding(self, x: T) -> T:
-        squeeze_batch = False
-        if x.ndim == 1:
-            x = x.unsqueeze(0)
-            squeeze_batch = True
-        if x.ndim == 2:
-            x = x.unsqueeze(1).repeat(1, self.channels, 1)
-        elif x.ndim == 3 and x.size(1) == 1 and self.channels == 2:
-            x = x.repeat(1, 2, 1)
+        if self.model_id == "facebook/encodec_48khz":
+            x = x.unsqueeze(1).repeat((1, 2, 1))  # (batch, 2, time_steps)
+        else:
+            x = x.unsqueeze(1)  # (batch, 1, time_steps)
 
         device = next(self.model.parameters()).device
         x = x.to(device)
-        x_emb = self.model.encoder(x)  # (batch, 128, time_steps)
-        x_emb = x_emb.transpose(1, 2)  # (batch, time_steps, 128)
-        if squeeze_batch:
-            x_emb = x_emb.squeeze(0)
+
+        # encoded_frames: (n_chunks, batch, hidden_size, chunk_steps).
+        # _encode_frame() is overridden above to return continuous
+        # embeddings here instead of quantized codes, while still using
+        # the model's normal chunking + per-chunk normalization.
+        encoded_frames, scales, last_frame_pad_length = self.model.encode(
+            x,
+            return_dict=False,
+        )
+        n_chunks, bs, hidden_size, chunk_steps = encoded_frames.shape
+        x_emb = encoded_frames.permute(1, 0, 3, 2).reshape(
+            bs, n_chunks * chunk_steps, hidden_size
+        )  # (batch, time_steps, hidden_size)
+
         return x_emb
 
 

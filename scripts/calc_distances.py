@@ -283,7 +283,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--samples-dir",
         # default="../out/audio_samples",
-        default="../out/audio_samples_28_phases",
+        default="../out/audio_samples_23_phases",
         help="Directory containing audio samples (default: ../out/audio_samples)",
     )
     parser.add_argument(
@@ -310,18 +310,23 @@ if __name__ == "__main__":
 
     samples_dir = args.samples_dir
     save_dir = args.save_dir
+    # tsv_path = args.save_path or os.path.join(save_dir, "testing.tsv")
     # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_mss_log_lin.tsv")
     # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_matched_mss_log_lin.tsv")
-    # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_matched_actually_mss_rev.tsv")
+    # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_mss_rev.tsv")
+    # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_matched_mss_rev.tsv")
     # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_mfcc.tsv")
     # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_matched_mfcc.tsv")
-    # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_vggish.tsv")
+    tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_vggish.tsv")
+    # tsv_path = args.save_path or os.path.join(save_dir, "distances_vggish.tsv")
     # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_matched_vggish.tsv")
     # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_clap2.tsv")
-    # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_encodec48.tsv")
+    # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_encodec48k.tsv")
+    # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_encodec24k.tsv")
+    # tsv_path = args.save_path or os.path.join(save_dir, "distances_encodec48k.tsv")
     # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_panns_wavegram_logmel.tsv")
     # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_scat1d.tsv")
-    tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_jtfs.tsv")
+    # tsv_path = args.save_path or os.path.join(save_dir, "distances_phases_jtfs.tsv")
     ref_match_phase = args.ref_match_phase
     sr = 44100
     target_lufs = -18
@@ -355,12 +360,13 @@ if __name__ == "__main__":
         #         p=2,
         #     ),
         # ),
-        # ("mfcc", MFCCDistance(sr=sr)),
+        # ("mfcc", MFCCDistance(sr=sr)),3
         # ("mfcc_p2", MFCCDistance(sr=sr, p=2)),
-        # ("vggish", VGGishEmbeddingLoss(in_sr=sr)),
+        ("vggish", VGGishEmbeddingLoss(in_sr=sr)),
         # ("vggish_tv", VGGishEmbeddingLoss(in_sr=sr, use_time_varying=True)),
         # ("clap2", ClapEmbeddingLoss(use_cuda=False, in_sr=sr)),
-        # ("encodec48", EncodecEmbeddingLoss(in_sr=sr)),
+        # ("encodec48k", EncodecEmbeddingLoss(in_sr=sr, model_id="facebook/encodec_48khz")),
+        # ("encodec24k", EncodecEmbeddingLoss(in_sr=sr, model_id="facebook/encodec_24khz")),
         # ("encodec48_tv", EncodecEmbeddingLoss(in_sr=sr, use_time_varying=True)),
         # ("panns_cnn14_32k", PANNsEmbeddingLoss(variant="cnn14-32k", in_sr=sr)),
         # (
@@ -372,7 +378,7 @@ if __name__ == "__main__":
         # ("scat1d_cqt", Scat1DLoss(shape=176400, J=12, Q1=8, Q2=2, T=1, max_order=1, p=2)),
         # ("jtfs", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=3, Q_fr=2, T=None, F=None, format_="joint", p=2)),
         # ("jtfs2", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=5, Q_fr=2, T=2048, F=1, format_="joint", p=2, use_rho_log1p=True)),
-        ("jtfs_log1p", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=5, Q_fr=2, T=None, F=None, format_="joint", p=2, use_rho_log1p=True)),
+        # ("jtfs_log1p", JTFSTLoss(shape=176400, J=12, Q1=8, Q2=2, J_fr=5, Q_fr=2, T=None, F=None, format_="joint", p=2, use_rho_log1p=True)),
     ]
     wavetables = DEFAULT_WAVETABLES
     mod_sig_references = [
