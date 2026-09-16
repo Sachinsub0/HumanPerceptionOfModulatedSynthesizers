@@ -1,18 +1,20 @@
 """Interaction-Pooled ANOVA and Variance Decomposition for Audio Loss Functions.
 
-Analyzes single-replicate distance measurements from data/distances.tsv.
+Analyzes single-replicate distance measurements from data/distances.tsv alongside
+human listening study mean ratings from data/listening_test_responses_postprocessed.tsv.
+
 Instead of treating randomized LFO phases as pseudo-subjects in a repeated-measures design,
-this script treats each loss evaluation as an unreplicated factorial design across:
+this script treats each metric evaluation as an unreplicated factorial design across:
 - modulation (3 levels: amp, freq, reg)
 - feature (3 levels: brightness, richness, warmth)
 - source (2 levels: real, synthetic)
 - rating_stimulus / amount (4 non-reference stimulus levels: condition_a .. condition_d)
 
-Total cells = 3 x 3 x 2 x 4 = 72 observations per loss function.
+Total cells = 3 x 3 x 2 x 4 = 72 observations per evaluation metric.
 
 ANOVA is computed via statsmodels.api.stats.anova_lm.
 Vectorized effect sizes (np2, eta_sq) match pingouin.anova implementations.
-Multiple hypothesis correction (FDR via Benjamini-Hochberg) is computed via
+Multiple hypothesis corrections (Bonferroni & Benjamini-Hochberg FDR) are computed via
 statsmodels.stats.multitest.multipletests.
 """
 
@@ -89,24 +91,44 @@ def prepare_loss_data(df: pd.DataFrame, loss_fn: str) -> pd.DataFrame:
     return sub
 
 
+def load_human_data(data_path: Path) -> pd.DataFrame:
+    """Aggregate human listening test responses into the standard 72-cell factorial format."""
+    df_human = pd.read_csv(data_path, sep="\t")
+    df_human = df_human[df_human["rating_stimulus"] != "reference"].copy()
+
+    split_cols = df_human["trial_id"].str.split("_", expand=True)
+    df_human["modulation"] = split_cols[0]
+    df_human["feature"] = split_cols[1]
+    df_human["source"] = split_cols[2]
+
+    # Mean rating score per condition across all participants
+    human_cells = (
+        df_human.groupby(
+            ["modulation", "feature", "source", "rating_stimulus"], as_index=False
+        )["rating_score"]
+        .mean()
+        .rename(columns={"rating_score": "distance"})
+    )
+    human_cells["loss_fn"] = "human"
+    return human_cells
+
+
 def compute_interaction_pooled_anova(
-    df_loss: pd.DataFrame,
+    df_data: pd.DataFrame,
     max_interaction: int = 2,
     dv: str = "distance",
 ) -> pd.DataFrame:
     """Compute interaction-pooled ANOVA and variance decomposition using statsmodels.
 
-    ANOVA table is computed via statsmodels.api.stats.anova_lm.
-    Effect sizes (np2, eta_sq) and FDR p-value corrections are calculated using
-    vectorized operations equivalent to pingouin.parametric.anovan and statsmodels.stats.multitest.
+    ANOVA table is computed via statsmodels.api.stats.anova_lm (Type II SS).
+    Effect sizes (np2, eta_sq) and multiple testing corrections (p_bonf, p_fdr)
+    are calculated using vectorized operations equivalent to pingouin and statsmodels.stats.multitest.
     """
     if max_interaction not in (2, 3):
         raise ValueError("max_interaction must be 2 or 3")
 
-    formula = (
-        f"{dv} ~ (C(modulation) + C(feature) + C(source) + C(rating_stimulus))**{max_interaction}"
-    )
-    model = ols(formula, data=df_loss).fit()
+    formula = f"{dv} ~ (C(modulation) + C(feature) + C(source) + C(rating_stimulus))**{max_interaction}"
+    model = ols(formula, data=df_data).fit()
 
     # Core ANOVA table from statsmodels
     aov = sm.stats.anova_lm(model, typ=2).reset_index()
@@ -127,6 +149,9 @@ def compute_interaction_pooled_anova(
         .str.replace(" ", "", regex=False)
         .str.replace("Residual", "Residual (pooled)", regex=False)
     )
+
+    # Degrees of Freedom as integer
+    aov["DF"] = aov["DF"].astype(int)
 
     # Mean Squares: MS = SS / DF
     aov["MS"] = aov["SS"] / aov["DF"]
@@ -174,79 +199,68 @@ def compute_interaction_pooled_anova(
 
 
 def format_table_for_display(df: pd.DataFrame) -> pd.DataFrame:
-    """Format ANOVA table to 4 decimal places with no scientific notation."""
+    """Format ANOVA table for clean terminal display with adaptive precision."""
     df_disp = df.copy()
-    for col in ["SS", "MS", "F", "p_unc", "p_bonf", "p_fdr", "np2", "eta_sq", "pct_var"]:
+
+    def _fmt(val):
+        if pd.isna(val):
+            return ""
+        if 0 < abs(val) < 0.0001:
+            return f"{val:.2e}"
+        return f"{val:.4f}"
+
+    for col in [
+        "SS",
+        "MS",
+        "F",
+        "p_unc",
+        "p_bonf",
+        "p_fdr",
+        "np2",
+        "eta_sq",
+        "pct_var",
+    ]:
         if col in df_disp.columns:
-            df_disp[col] = df_disp[col].apply(
-                lambda x: "" if pd.isna(x) else f"{x:.4f}"
-            )
+            df_disp[col] = df_disp[col].apply(_fmt)
+
     df_disp["DF"] = df_disp["DF"].astype(int)
     return df_disp
 
 
-def compute_human_variance_profile(
-    data_path: Path,
+def extract_variance_record(
+    res_df: pd.DataFrame,
+    label: str,
     max_interaction: int = 2,
-) -> dict[str, float]:
-    """Compute the variance decomposition profile from the human listening study for comparison."""
-    if not data_path.exists():
-        return {}
+) -> dict[str, float | str]:
+    """Extract variance decomposition percentages from an ANOVA result DataFrame."""
+    term_map = dict(zip(res_df["Source"], res_df["pct_var"]))
+    two_way_terms = [k for k in term_map if k.count(":") == 1]
+    two_way_pct = sum(term_map[k] for k in two_way_terms)
 
-    df_human = pd.read_csv(data_path, sep="\t")
-    df_human = df_human[df_human["rating_stimulus"] != "reference"].copy()
-    split_cols = df_human["trial_id"].str.split("_", expand=True)
-    df_human["modulation"] = split_cols[0]
-    df_human["feature"] = split_cols[1]
-    df_human["source"] = split_cols[2]
-
-    mod_means = (
-        df_human.groupby(
-            ["modulation", "feature", "source", "rating_stimulus"], as_index=False
-        )["rating_score"]
-        .mean()
-        .rename(columns={"rating_score": "mean_rating"})
-    )
-
-    model = ols(
-        f"mean_rating ~ (C(modulation) + C(feature) + C(source) + C(rating_stimulus))**{max_interaction}",
-        data=mod_means,
-    ).fit()
-    aov = sm.stats.anova_lm(model, typ=2)
-    ss_total = ((mod_means["mean_rating"] - mod_means["mean_rating"].mean()) ** 2).sum()
-
-    aov["eta_sq"] = aov["sum_sq"] / ss_total
-    terms = {
-        str(idx).replace("C(", "").replace(")", "").replace(" ", ""): val
-        for idx, val in aov["eta_sq"].items()
-    }
-
-    two_way_keys = [k for k in terms if k.count(":") == 1]
-    two_way_sum = sum(terms[k] for k in two_way_keys)
-
-    profile = {
-        "rating_stimulus": terms.get("rating_stimulus", 0.0),
-        "modulation": terms.get("modulation", 0.0),
-        "feature": terms.get("feature", 0.0),
-        "source": terms.get("source", 0.0),
-        "interactions_2way": two_way_sum,
+    rec: dict[str, float | str] = {
+        "Metric": label,
+        "% Var (Amount)": term_map.get("rating_stimulus", 0.0),
+        "% Var (Modulation)": term_map.get("modulation", 0.0),
+        "% Var (Feature)": term_map.get("feature", 0.0),
+        "% Var (Source)": term_map.get("source", 0.0),
+        "% Var (2-Way Inter.)": two_way_pct,
     }
     if max_interaction >= 3:
-        three_way_keys = [k for k in terms if k.count(":") == 2]
-        three_way_sum = sum(terms[k] for k in three_way_keys)
-        profile["interactions_3way"] = three_way_sum
-    profile["residual_pooled"] = terms.get("Residual", 0.0)
-
-    return profile
+        three_way_terms = [k for k in term_map if k.count(":") == 2]
+        three_way_pct = sum(term_map[k] for k in three_way_terms)
+        rec["% Var (3-Way Inter.)"] = three_way_pct
+    rec["% Var (Residual)"] = term_map.get("Residual (pooled)", 0.0)
+    return rec
 
 
 def run_variance_analysis(
     data_path: Path,
+    human_data_path: Path | None = None,
     output_path: Path | None = None,
     loss_fns: list[str] | None = None,
     max_interaction: int = 2,
 ):
-    """Run interaction-pooled ANOVA and variance decomposition for loss functions."""
+    """Run interaction-pooled ANOVA and variance decomposition for loss functions & human ratings."""
     log.info(f"Loading distance data from: {data_path}")
     df = pd.read_csv(data_path, sep="\t")
 
@@ -263,47 +277,56 @@ def run_variance_analysis(
         f"Analyzing {len(selected_losses)} loss functions with max_interaction={max_interaction}..."
     )
 
-    results_by_loss = {}
-    summary_records = []
+    results_by_loss: dict[str, pd.DataFrame] = {}
 
+    # 1. Process human listening study benchmark if available
+    human_record: dict[str, float | str] | None = None
+    if human_data_path and human_data_path.exists():
+        log.info(f"Loading human listening benchmark data from: {human_data_path}")
+        df_human = load_human_data(human_data_path)
+        human_res = compute_interaction_pooled_anova(
+            df_human, max_interaction=max_interaction, dv="distance"
+        )
+        results_by_loss["human"] = human_res
+        human_record = extract_variance_record(
+            human_res,
+            label="Human Listeners (Reference)",
+            max_interaction=max_interaction,
+        )
+
+    # 2. Process algorithmic loss functions
+    loss_summary_records = []
     for loss in selected_losses:
         sub = prepare_loss_data(df, loss)
         res_df = compute_interaction_pooled_anova(
             sub, max_interaction=max_interaction, dv="distance"
         )
         results_by_loss[loss] = res_df
+        loss_summary_records.append(
+            extract_variance_record(res_df, label=loss, max_interaction=max_interaction)
+        )
 
-        term_map = dict(zip(res_df["Source"], res_df["pct_var"]))
-        two_way_terms = [k for k in term_map if k.count(":") == 1]
-        two_way_pct = sum(term_map[k] for k in two_way_terms)
-
-        rec = {
-            "loss_fn": loss,
-            "% Var (Amount)": term_map.get("rating_stimulus", 0.0),
-            "% Var (Modulation)": term_map.get("modulation", 0.0),
-            "% Var (Feature)": term_map.get("feature", 0.0),
-            "% Var (Source)": term_map.get("source", 0.0),
-            "% Var (2-Way Inter.)": two_way_pct,
-        }
-        if max_interaction >= 3:
-            three_way_terms = [k for k in term_map if k.count(":") == 2]
-            three_way_pct = sum(term_map[k] for k in three_way_terms)
-            rec["% Var (3-Way Inter.)"] = three_way_pct
-        rec["% Var (Residual)"] = term_map.get("Residual (pooled)", 0.0)
-
-        summary_records.append(rec)
-
-    sep_bar = "=" * 125
+    sep_bar = "=" * 135
     log.info("\n" + sep_bar)
-    log.info(f"INTERACTION-POOLED ANOVA & VARIANCE DECOMPOSITION (Pooled Order: >{max_interaction}-Way)")
+    log.info(
+        f"INTERACTION-POOLED ANOVA & VARIANCE DECOMPOSITION (Pooled Order: >{max_interaction}-Way)"
+    )
     log.info(sep_bar)
 
+    # Print human benchmark detailed ANOVA first if present
+    if "human" in results_by_loss:
+        log.info("\n--- Reference Metric: Human Listeners (Mean Rating Scores) ---")
+        disp_human = format_table_for_display(results_by_loss["human"])
+        log.info("\n" + disp_human.to_string(index=False))
+
+    # Print loss functions detailed ANOVA
     for loss in selected_losses:
         log.info(f"\n--- Loss Function: {loss} ---")
         disp_df = format_table_for_display(results_by_loss[loss])
         log.info("\n" + disp_df.to_string(index=False))
 
-    summary_df = pd.DataFrame(summary_records)
+    # Summary table: Sort loss functions by modulation amount sensitivity (% Var Amount)
+    summary_df = pd.DataFrame(loss_summary_records)
     summary_df = summary_df.sort_values("% Var (Amount)", ascending=False).reset_index(
         drop=True
     )
@@ -312,59 +335,62 @@ def run_variance_analysis(
     log.info("SUMMARY: VARIANCE DECOMPOSITION PROFILES (% OF TOTAL VARIANCE EXPLAINED)")
     log.info(sep_bar)
 
-    repo_root = Path(__file__).resolve().parent.parent
-    human_path = repo_root / "data" / "listening_test_responses_postprocessed.tsv"
-    human_prof = compute_human_variance_profile(human_path, max_interaction=max_interaction)
-    if human_prof:
-        log.info("\n[Human Listening Study Reference Profile (% of mean rating variance)]:")
-        h_dict = {
-            "Reference": "Human Listeners",
-            "% Var (Amount)": human_prof["rating_stimulus"] * 100,
-            "% Var (Modulation)": human_prof["modulation"] * 100,
-            "% Var (Feature)": human_prof["feature"] * 100,
-            "% Var (Source)": human_prof["source"] * 100,
-            "% Var (2-Way Inter.)": human_prof["interactions_2way"] * 100,
-        }
-        if max_interaction >= 3:
-            h_dict["% Var (3-Way Inter.)"] = human_prof.get("interactions_3way", 0.0) * 100
-        h_dict["% Var (Residual)"] = human_prof["residual_pooled"] * 100
-        h_row = pd.DataFrame([h_dict])
-        for c in h_row.columns[1:]:
-            h_row[c] = h_row[c].apply(lambda x: f"{x:.2f}%")
-        log.info(h_row.to_string(index=False))
+    # Combine human reference at top followed by loss functions
+    all_summary_rows = []
+    if human_record:
+        all_summary_rows.append(human_record)
+    all_summary_rows.extend(summary_df.to_dict("records"))
 
-    log.info("\n[Loss Function Profiles]:")
-    disp_summary = summary_df.copy()
+    combined_summary_df = pd.DataFrame(all_summary_rows)
+    disp_summary = combined_summary_df.copy()
     for col in disp_summary.columns[1:]:
         disp_summary[col] = disp_summary[col].apply(lambda x: f"{x:.2f}%")
-    log.info(disp_summary.to_string(index=False))
+
+    log.info("\n" + disp_summary.to_string(index=False))
     log.info(sep_bar + "\n")
 
+    # 3. Export full results TSV (including human reference if present)
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        combined_records = []
-        for loss, df_res in results_by_loss.items():
-            df_copy = df_res.copy()
+        export_records = []
+        # Include human first
+        if "human" in results_by_loss:
+            df_h = results_by_loss["human"].copy()
+            df_h.insert(0, "loss_fn", "human")
+            export_records.append(df_h)
+        for loss in selected_losses:
+            df_copy = results_by_loss[loss].copy()
             df_copy.insert(0, "loss_fn", loss)
-            combined_records.append(df_copy)
-        combined_df = pd.concat(combined_records, ignore_index=True)
+            export_records.append(df_copy)
+
+        combined_df = pd.concat(export_records, ignore_index=True)
         combined_df.to_csv(output_path, sep="\t", index=False)
-        log.info(f"Successfully saved detailed ANOVA & variance results to: {output_path}")
+        log.info(
+            f"Successfully saved detailed ANOVA & variance results to: {output_path}"
+        )
 
 
 def main():
     repo_root = Path(__file__).resolve().parent.parent
     default_data_path = repo_root / "data" / "distances.tsv"
+    default_human_path = (
+        repo_root / "data" / "listening_test_responses_postprocessed.tsv"
+    )
     default_out_path = repo_root / "data" / "distances_loss_variance_analysis.tsv"
 
     parser = argparse.ArgumentParser(
-        description="Interaction-pooled ANOVA and variance decomposition for audio loss functions."
+        description="Interaction-pooled ANOVA and variance decomposition for audio loss functions & human ratings."
     )
     parser.add_argument(
         "data_path",
         nargs="?",
         default=str(default_data_path),
         help=f"Path to distances TSV file (default: {default_data_path})",
+    )
+    parser.add_argument(
+        "--human-data",
+        default=str(default_human_path),
+        help=f"Path to postprocessed human listening responses (default: {default_human_path})",
     )
     parser.add_argument(
         "--output",
@@ -385,7 +411,6 @@ def main():
         "--max-interaction",
         type=int,
         default=2,
-        # default=3,
         choices=[2, 3],
         help="Maximum interaction order to include (2: pool 3-way & 4-way, 3: pool 4-way; default: 2)",
     )
@@ -393,6 +418,7 @@ def main():
 
     run_variance_analysis(
         data_path=Path(args.data_path),
+        human_data_path=Path(args.human_data) if args.human_data else None,
         output_path=Path(args.output) if args.output else None,
         loss_fns=args.loss_fn,
         max_interaction=args.max_interaction,
