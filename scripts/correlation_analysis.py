@@ -554,7 +554,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-o",
         "--output",
-        default=None,
+        default="../out/correlation_results.tsv",
         help="Optional path to save results as CSV or TSV.",
     )
     args = parser.parse_args()
@@ -591,7 +591,6 @@ if __name__ == "__main__":
 
     if args.output:
         out_path = Path(args.output).expanduser().resolve()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
         sep = "\t" if out_path.suffix == ".tsv" else ","
         results_df.to_csv(out_path, sep=sep, index=False)
         print(f"Results successfully exported to: {out_path}")

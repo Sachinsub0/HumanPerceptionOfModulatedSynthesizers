@@ -94,26 +94,26 @@ def _compute_slice_ceilings(
         return {
             "n_stimuli": n_stimuli,
             "n_subjects": n_subjects,
-            "pearson_lower": float("nan"),
-            "pearson_lower_std": float("nan"),
-            "pearson_upper": float("nan"),
-            "pearson_upper_std": float("nan"),
+            "pearson_indiv_lower": float("nan"),
+            "pearson_indiv_lower_std": float("nan"),
+            "pearson_indiv_upper": float("nan"),
+            "pearson_indiv_upper_std": float("nan"),
             "pearson_group": float("nan"),
             "pearson_group_std": float("nan"),
             "pearson_group_ci95_low": float("nan"),
             "pearson_group_ci95_high": float("nan"),
-            "spearman_lower": float("nan"),
-            "spearman_lower_std": float("nan"),
-            "spearman_upper": float("nan"),
-            "spearman_upper_std": float("nan"),
+            "spearman_indiv_lower": float("nan"),
+            "spearman_indiv_lower_std": float("nan"),
+            "spearman_indiv_upper": float("nan"),
+            "spearman_indiv_upper_std": float("nan"),
             "spearman_group": float("nan"),
             "spearman_group_std": float("nan"),
             "spearman_group_ci95_low": float("nan"),
             "spearman_group_ci95_high": float("nan"),
-            "kendall_lower": float("nan"),
-            "kendall_lower_std": float("nan"),
-            "kendall_upper": float("nan"),
-            "kendall_upper_std": float("nan"),
+            "kendall_indiv_lower": float("nan"),
+            "kendall_indiv_lower_std": float("nan"),
+            "kendall_indiv_upper": float("nan"),
+            "kendall_indiv_upper_std": float("nan"),
             "kendall_group": float("nan"),
             "kendall_group_std": float("nan"),
             "kendall_group_ci95_low": float("nan"),
@@ -195,26 +195,26 @@ def _compute_slice_ceilings(
     return {
         "n_stimuli": n_stimuli,
         "n_subjects": n_subjects,
-        "pearson_lower": float(np.mean(p_lower)),
-        "pearson_lower_std": float(np.std(p_lower, ddof=1)),
-        "pearson_upper": float(np.mean(p_upper)),
-        "pearson_upper_std": float(np.std(p_upper, ddof=1)),
+        "pearson_indiv_lower": float(np.mean(p_lower)),
+        "pearson_indiv_lower_std": float(np.std(p_lower, ddof=1)),
+        "pearson_indiv_upper": float(np.mean(p_upper)),
+        "pearson_indiv_upper_std": float(np.std(p_upper, ddof=1)),
         "pearson_group": float(np.mean(p_splits)) if p_splits else float("nan"),
         "pearson_group_std": float(np.std(p_splits, ddof=1)) if p_splits else float("nan"),
         "pearson_group_ci95_low": p_ci_low,
         "pearson_group_ci95_high": p_ci_high,
-        "spearman_lower": float(np.mean(s_lower)),
-        "spearman_lower_std": float(np.std(s_lower, ddof=1)),
-        "spearman_upper": float(np.mean(s_upper)),
-        "spearman_upper_std": float(np.std(s_upper, ddof=1)),
+        "spearman_indiv_lower": float(np.mean(s_lower)),
+        "spearman_indiv_lower_std": float(np.std(s_lower, ddof=1)),
+        "spearman_indiv_upper": float(np.mean(s_upper)),
+        "spearman_indiv_upper_std": float(np.std(s_upper, ddof=1)),
         "spearman_group": float(np.mean(s_splits)) if s_splits else float("nan"),
         "spearman_group_std": float(np.std(s_splits, ddof=1)) if s_splits else float("nan"),
         "spearman_group_ci95_low": s_ci_low,
         "spearman_group_ci95_high": s_ci_high,
-        "kendall_lower": float(np.mean(k_lower)),
-        "kendall_lower_std": float(np.std(k_lower, ddof=1)),
-        "kendall_upper": float(np.mean(k_upper)),
-        "kendall_upper_std": float(np.std(k_upper, ddof=1)),
+        "kendall_indiv_lower": float(np.mean(k_lower)),
+        "kendall_indiv_lower_std": float(np.std(k_lower, ddof=1)),
+        "kendall_indiv_upper": float(np.mean(k_upper)),
+        "kendall_indiv_upper_std": float(np.std(k_upper, ddof=1)),
         "kendall_group": float(np.mean(k_splits)) if k_splits else float("nan"),
         "kendall_group_std": float(np.std(k_splits, ddof=1)) if k_splits else float("nan"),
         "kendall_group_ci95_low": k_ci_low,
@@ -343,8 +343,7 @@ if __name__ == "__main__":
     default_data_path = (
         Path(__file__).resolve().parent.parent
         / "data"
-        / "listening_test_responses_preprocessed.tsv"
-        # / "listening_test_responses_preprocessed_prev.tsv"
+        / "listening_test_responses_postprocessed.tsv"
     )
 
     parser = argparse.ArgumentParser(
@@ -387,7 +386,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-o",
         "--output",
-        default=None,
+        default="../out/noise_ceiling_results.tsv",
         help="Optional path to save results as CSV or TSV.",
     )
     args = parser.parse_args()
@@ -422,46 +421,3 @@ if __name__ == "__main__":
         sep = "\t" if out_path.suffix == ".tsv" else ","
         results_df.to_csv(out_path, sep=sep, index=False)
         print(f"Results successfully exported to: {out_path}")
-
-
-# ========================================================================================================================
-# NOISE CEILING RESULTS (DataFrame)
-# ========================================================================================================================
-#       granularity       condition  n_trials  n_stimuli  n_subjects  pearson_lower  pearson_lower_std  pearson_upper  pearson_upper_std  pearson_group  pearson_group_std  pearson_group_ci95_low  pearson_group_ci95_high  spearman_lower  spearman_lower_std  spearman_upper  spearman_upper_std  spearman_group  spearman_group_std  spearman_group_ci95_low  spearman_group_ci95_high  kendall_lower  kendall_lower_std  kendall_upper  kendall_upper_std  kendall_group  kendall_group_std  kendall_group_ci95_low  kendall_group_ci95_high
-#            entire   all_18_trials        18         72          21          0.817              0.065          0.835              0.059          0.979              0.005                   0.967                    0.987           0.813               0.062           0.830               0.057           0.976               0.006                    0.962                     0.986          0.646              0.063          0.665              0.060          0.827              0.023                   0.779                    0.868
-#        modulation             amp         6         24          25          0.757              0.108          0.777              0.101          0.974              0.011                   0.947                    0.989           0.752               0.102           0.771               0.097           0.971               0.013                    0.940                     0.989          0.593              0.096          0.614              0.094          0.816              0.044                   0.718                    0.884
-#        modulation            freq         6         24          26          0.884              0.090          0.893              0.083          0.990              0.003                   0.983                    0.995           0.874               0.083           0.886               0.073           0.983               0.004                    0.974                     0.991          0.725              0.104          0.741              0.096          0.863              0.025                   0.812                    0.911
-#        modulation             reg         6         24          24          0.803              0.083          0.820              0.076          0.977              0.008                   0.958                    0.990           0.810               0.085           0.821               0.082           0.976               0.010                    0.952                     0.990          0.645              0.084          0.659              0.083          0.842              0.037                   0.766                    0.904
-# modulation_timbre  amp_brightness         2          8          27          0.802              0.160          0.816              0.150          0.984              0.012                   0.953                    0.997           0.763               0.193           0.806               0.157           0.970               0.009                    0.963                     0.988          0.637              0.184          0.678              0.166          0.825              0.047                   0.786                    0.929
-# modulation_timbre    amp_richness         2          8          27          0.809              0.169          0.823              0.158          0.982              0.013                   0.950                    0.997           0.793               0.194           0.808               0.179           0.966               0.013                    0.950                     0.988          0.680              0.185          0.693              0.171          0.804              0.067                   0.714                    0.929
-# modulation_timbre      amp_warmth         2          8          27          0.796              0.176          0.810              0.168          0.982              0.011                   0.957                    0.996           0.806               0.177           0.809               0.177           0.972               0.019                    0.937                     1.000          0.693              0.190          0.696              0.189          0.867              0.071                   0.714                    1.000
-# modulation_timbre freq_brightness         2          8          27          0.950              0.054          0.953              0.052          0.997              0.002                   0.992                    1.000           0.937               0.054           0.937               0.054           0.992               0.009                    0.976                     1.000          0.848              0.095          0.848              0.095          0.950              0.055                   0.857                    1.000
-# modulation_timbre   freq_richness         2          8          26          0.901              0.163          0.908              0.152          0.992              0.004                   0.982                    0.997           0.882               0.171           0.898               0.147           0.969               0.008                    0.963                     0.988          0.793              0.168          0.813              0.156          0.819              0.045                   0.786                    0.929
-# modulation_timbre     freq_warmth         2          8          28          0.900              0.123          0.907              0.116          0.993              0.004                   0.984                    0.999           0.906               0.118           0.906               0.118           0.998               0.005                    0.988                     1.000          0.814              0.149          0.814              0.149          0.991              0.026                   0.929                    1.000
-# modulation_timbre  reg_brightness         2          8          28          0.839              0.134          0.851              0.126          0.986              0.008                   0.968                    0.997           0.851               0.150           0.855               0.148           0.983               0.010                    0.963                     1.000          0.755              0.164          0.758              0.162          0.903              0.057                   0.786                    1.000
-# modulation_timbre    reg_richness         2          8          28          0.837              0.131          0.847              0.126          0.987              0.008                   0.969                    0.997           0.782               0.182           0.808               0.181           0.966               0.011                    0.950                     0.988          0.659              0.178          0.694              0.186          0.805              0.062                   0.714                    0.929
-# modulation_timbre      reg_warmth         2          8          24          0.814              0.156          0.831              0.142          0.976              0.014                   0.938                    0.995           0.834               0.135           0.834               0.135           0.984               0.019                    0.926                     1.000          0.722              0.160          0.722              0.160          0.927              0.068                   0.785                    1.000
-# ========================================================================================================================
-
-
-
-
-# Previous
-# ========================================================================================================================
-# NOISE CEILING RESULTS (DataFrame)
-# ========================================================================================================================
-#       granularity       condition  n_trials  n_stimuli  n_subjects  pearson_lower  pearson_lower_std  pearson_upper  pearson_upper_std  pearson_group  pearson_group_std  pearson_group_ci95_low  pearson_group_ci95_high  spearman_lower  spearman_lower_std  spearman_upper  spearman_upper_std  spearman_group  spearman_group_std  spearman_group_ci95_low  spearman_group_ci95_high  kendall_lower  kendall_lower_std  kendall_upper  kendall_upper_std  kendall_group  kendall_group_std  kendall_group_ci95_low  kendall_group_ci95_high
-#            entire   all_18_trials        18         72          22          0.820              0.061          0.837              0.056          0.980              0.005                   0.969                    0.987           0.817               0.058           0.833               0.054           0.978               0.006                    0.964                     0.986          0.646              0.062          0.665              0.059          0.832              0.021                   0.783                    0.868
-#        modulation             amp         6         24          38          0.784              0.096          0.796              0.092          0.985              0.006                   0.970                    0.993           0.786               0.093           0.790               0.091           0.985               0.007                    0.969                     0.994          0.622              0.096          0.629              0.095          0.874              0.034                   0.804                    0.935
-#        modulation            freq         6         24          39          0.876              0.085          0.882              0.081          0.993              0.003                   0.987                    0.997           0.871               0.079           0.878               0.075           0.988               0.004                    0.980                     0.995          0.722              0.098          0.732              0.095          0.896              0.025                   0.848                    0.942
-#        modulation             reg         6         24          29          0.793              0.082          0.808              0.076          0.980              0.007                   0.964                    0.990           0.799               0.079           0.811               0.079           0.977               0.008                    0.959                     0.989          0.638              0.081          0.651              0.081          0.838              0.033                   0.768                    0.899
-# modulation_timbre  amp_brightness         2          8          44          0.808              0.160          0.816              0.155          0.990              0.007                   0.971                    0.998           0.767               0.195           0.800               0.178           0.973               0.008                    0.963                     0.988          0.661              0.202          0.691              0.192          0.842              0.047                   0.786                    0.929
-# modulation_timbre    amp_richness         2          8          45          0.819              0.159          0.827              0.153          0.990              0.007                   0.973                    0.998           0.782               0.187           0.803               0.177           0.968               0.011                    0.950                     0.988          0.661              0.185          0.683              0.180          0.812              0.064                   0.714                    0.929
-# modulation_timbre      amp_warmth         2          8          43          0.790              0.160          0.799              0.155          0.987              0.008                   0.967                    0.998           0.791               0.180           0.791               0.180           0.994               0.010                    0.963                     1.000          0.674              0.186          0.674              0.186          0.969              0.047                   0.857                    1.000
-# modulation_timbre freq_brightness         2          8          45          0.944              0.050          0.947              0.048          0.998              0.001                   0.995                    1.000           0.930               0.050           0.930               0.050           0.987               0.011                    0.963                     1.000          0.833              0.087          0.833              0.087          0.925              0.063                   0.786                    1.000
-# modulation_timbre   freq_richness         2          8          43          0.874              0.161          0.879              0.154          0.993              0.004                   0.985                    0.999           0.870               0.145           0.870               0.145           0.974               0.012                    0.950                     1.000          0.772              0.162          0.773              0.161          0.850              0.070                   0.714                    1.000
-# modulation_timbre     freq_warmth         2          8          45          0.885              0.132          0.889              0.127          0.995              0.003                   0.987                    0.999           0.883               0.147           0.883               0.147           0.999               0.003                    0.988                     1.000          0.786              0.173          0.786              0.173          0.995              0.019                   0.929                    1.000
-# modulation_timbre  reg_brightness         2          8          39          0.832              0.130          0.841              0.124          0.989              0.006                   0.976                    0.998           0.835               0.143           0.835               0.143           0.984               0.010                    0.963                     1.000          0.723              0.167          0.723              0.167          0.904              0.056                   0.786                    1.000
-# modulation_timbre    reg_richness         2          8          42          0.834              0.135          0.842              0.131          0.991              0.005                   0.979                    0.998           0.795               0.184           0.797               0.182           0.976               0.011                    0.950                     1.000          0.678              0.180          0.680              0.178          0.859              0.064                   0.714                    1.000
-# modulation_timbre      reg_warmth         2          8          33          0.786              0.193          0.799              0.187          0.982              0.011                   0.952                    0.996           0.797               0.190           0.797               0.190           0.989               0.014                    0.950                     1.000          0.684              0.196          0.684              0.196          0.942              0.063                   0.786                    1.000
-# ========================================================================================================================

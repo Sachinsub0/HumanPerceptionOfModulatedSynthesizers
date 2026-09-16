@@ -376,7 +376,7 @@ def main():
     default_human_path = (
         repo_root / "data" / "listening_test_responses_postprocessed.tsv"
     )
-    default_out_path = repo_root / "data" / "distances_loss_variance_analysis.tsv"
+    default_out_path = repo_root / "out" / "anova_variance_results.tsv"
 
     parser = argparse.ArgumentParser(
         description="Interaction-pooled ANOVA and variance decomposition for audio loss functions & human ratings."
