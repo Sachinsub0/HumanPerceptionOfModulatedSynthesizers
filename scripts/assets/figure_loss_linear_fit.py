@@ -6,16 +6,21 @@ and the shared 'Modulation amount' label appear only once at the very bottom row
 with column titles displayed at the top. Reference points are marked with squares,
 subsequent points with circles.
 
-Plotting options (--plot):
+Plotting options (--plot and --loss-fn):
 - 'losses' (default): individual loss functions (or with Human Listeners as row 0 if --human-data is given).
 - 'groups': 3 rows of aggregated representation groups (STFT, Wavelet, Neural).
 - 'all': combines all individual loss functions and the 3 aggregated groups.
+- --loss-fn / -l: filter and reorder analysis to specific loss function(s) (e.g. -l mfcc mss_log_lin).
 
 Human benchmark option (--human-data / --human):
 - When provided (e.g. data/listening_test_responses_postprocessed.tsv), participant ratings
   are preserved across all participants to compute empirical range, std, and CI before averaging,
   graphed as the first row ('Human Listeners') with y-axis ticks [0, 25, 50, 75, 100].
   The vertical gap between the human row and subsequent rows is configurable via --gap-human.
+
+Representation group boundaries & dashed lines:
+- A configurable vertical gap (--gap-group, default: 0.32) and subtle dashed horizontal
+  separator line are drawn between distinct representation groups (Wavelet, Neural, STFT).
 
 Normalization options (--normalize):
 - '1' or 'max100': Peak/max normalization to [0, 100] globally per loss function.
@@ -26,6 +31,7 @@ Normalization options (--normalize):
 
 Fit & Error Bar options:
 - Linear line of best fit & R^2: toggleable via --no-fit / --hide-fit (default: shown).
+- Anchor linear fit to y=0 at first x value: --anchor-zero / --anchor-first (default: anchored).
 - Connecting dots: --connect-dots / --connect-points (straight black line segments).
 - Error bars (mutually exclusive metric):
   - 95% Confidence Intervals: --ci or --error-bars ci
@@ -70,11 +76,12 @@ INDIVIDUAL_LOSS_FUNCTIONS = [
 
 # Aggregated representation groups and constituent loss functions
 AGGREGATED_GROUPS = [
-    {"key": "group_stft", "label": "STFT Group", "models": ["mss_log_lin", "mss_rev", "mfcc"]},
-    {"key": "group_wavelet", "label": "Wavelet Group", "models": ["scat1d_log1p", "jtfs_log1p"]},
+    {"key": "group_stft", "label": "STFT Group", "group": "STFT", "models": ["mss_log_lin", "mss_rev", "mfcc"]},
+    {"key": "group_wavelet", "label": "Wavelet Group", "group": "Wavelet", "models": ["scat1d_log1p", "jtfs_log1p"]},
     {
         "key": "group_neural",
         "label": "Neural Group",
+        "group": "Neural",
         "models": ["vggish", "encodec48k", "clap2", "panns_wavegram_logmel"],
     },
 ]
@@ -261,38 +268,80 @@ def compute_nice_5_ticks(v_max: float) -> tuple[list[float | int], float, float]
     return ticks, y_lower, y_upper
 
 
+def normalize_loss_fns(raw_loss_fns: Sequence[str] | None) -> list[str] | None:
+    """Clean and tokenize user-supplied loss function filter list."""
+    if not raw_loss_fns:
+        return None
+    cleaned: list[str] = []
+    for item in raw_loss_fns:
+        for term in item.replace(",", " ").split():
+            c = term.strip()
+            if c and c not in cleaned:
+                cleaned.append(c)
+    return cleaned if cleaned else None
+
+
 def prepare_plot_items(
     plot_mode: str,
     df_norm: pd.DataFrame,
+    loss_fns: Sequence[str] | None = None,
 ) -> list[dict]:
-    """Prepare row data specifications according to the chosen plot mode."""
+    """Prepare row data specifications according to the chosen plot mode and loss function filter."""
     items: list[dict] = []
 
     # If human benchmark data is present, graph it as the first row
     if "human" in df_norm["loss_fn"].unique():
         items.append({
             "type": "human",
+            "group": "human",
             "label": "Human Listeners",
             "sub_df": df_norm[df_norm["loss_fn"] == "human"],
         })
 
+    # Lookup mapping for canonical display labels and groups
+    loss_label_map = {key: label for key, label, _ in INDIVIDUAL_LOSS_FUNCTIONS}
+    loss_group_map = {key: grp for key, _, grp in INDIVIDUAL_LOSS_FUNCTIONS}
+
     if plot_mode in ("losses", "all"):
-        for key, label, _ in INDIVIDUAL_LOSS_FUNCTIONS:
-            sub = df_norm[df_norm["loss_fn"] == key]
-            if not sub.empty:
-                items.append({
-                    "type": "individual",
-                    "label": label,
-                    "sub_df": sub,
-                })
+        if loss_fns is not None:
+            # Respect user-specified selection and ordering of loss functions
+            for key in loss_fns:
+                sub = df_norm[df_norm["loss_fn"] == key]
+                if not sub.empty:
+                    label = loss_label_map.get(key, key)
+                    group = loss_group_map.get(key, "Other")
+                    items.append({
+                        "type": "individual",
+                        "group": group,
+                        "label": label,
+                        "sub_df": sub,
+                    })
+        else:
+            for key, label, grp in INDIVIDUAL_LOSS_FUNCTIONS:
+                sub = df_norm[df_norm["loss_fn"] == key]
+                if not sub.empty:
+                    items.append({
+                        "type": "individual",
+                        "group": grp,
+                        "label": label,
+                        "sub_df": sub,
+                    })
 
     if plot_mode in ("groups", "all"):
         for grp in AGGREGATED_GROUPS:
-            items.append({
-                "type": "group",
-                "label": grp["label"],
-                "sub_df": df_norm[df_norm["loss_fn"].isin(grp["models"])],
-            })
+            group_models = grp["models"]
+            if loss_fns is not None:
+                group_models = [m for m in group_models if m in loss_fns]
+            if group_models:
+                sub = df_norm[df_norm["loss_fn"].isin(group_models)]
+                if not sub.empty:
+                    group_id = f"Aggregated_{grp['group']}" if plot_mode == "all" else grp["group"]
+                    items.append({
+                        "type": "group",
+                        "group": group_id,
+                        "label": grp["label"],
+                        "sub_df": sub,
+                    })
 
     return items
 
@@ -300,8 +349,10 @@ def prepare_plot_items(
 def plot_loss_linear_fits(
     df: pd.DataFrame,
     plot_mode: str = "losses",
+    loss_fns: Sequence[str] | None = None,
     normalize: str = "none",
     show_fit: bool = True,
+    anchor_zero: bool = True,
     connect_dots: bool = False,
     error_mode: str = "ci",
     error_style: str = "bars",
@@ -313,7 +364,8 @@ def plot_loss_linear_fits(
     plot_size: float = 2.0,
     gap_x: float = 0.08,
     gap_y: float = 0.08,
-    gap_human: float = 0.16,
+    gap_human: float = 0.32,
+    gap_group: float = 0.32,
     line_color: str = "#2a78d6",
     marker_color: str = "#111111",
     r2_decimals: int = 2,
@@ -327,7 +379,8 @@ def plot_loss_linear_fits(
         norm_clean = "1"
 
     df_plot = normalize_distances(df, norm_clean)
-    row_items = prepare_plot_items(plot_mode, df_plot)
+    loss_fns_clean = normalize_loss_fns(loss_fns)
+    row_items = prepare_plot_items(plot_mode, df_plot, loss_fns=loss_fns_clean)
 
     plt.rcParams.update({
         "font.sans-serif": ["DejaVu Sans", "Helvetica", "Arial"],
@@ -337,38 +390,43 @@ def plot_loss_linear_fits(
 
     n_rows = len(row_items)
     n_cols = len(MODULATION_COLUMNS)
-    has_human = any(item.get("type") == "human" for item in row_items)
-    has_custom_human_gap = has_human and n_rows > 1
 
     margin_left = 0.85
     margin_right = 0.06
     margin_bottom = 0.44
     margin_top = 0.32
 
-    # Calculate figure dimensions, taking configurable gap_human into account
+    # Determine vertical gaps between consecutive rows: row_gaps[r] is between row r (above) and r+1 (below)
+    row_gaps: list[float] = []
+    has_separator: list[bool] = []
+    for r in range(n_rows - 1):
+        curr_item = row_items[r]
+        next_item = row_items[r + 1]
+        if curr_item.get("type") == "human":
+            row_gaps.append(gap_human)
+            has_separator.append(True)
+        elif curr_item.get("group") != next_item.get("group"):
+            row_gaps.append(gap_group)
+            has_separator.append(True)
+        else:
+            row_gaps.append(gap_y)
+            has_separator.append(False)
+
     fig_w = margin_left + n_cols * plot_size + (n_cols - 1) * gap_x + margin_right
-    if has_custom_human_gap:
-        total_gaps_y = (n_rows - 2) * gap_y + gap_human
-    else:
-        total_gaps_y = (n_rows - 1) * gap_y
+    total_gaps_y = sum(row_gaps)
     fig_h = margin_bottom + n_rows * plot_size + total_gaps_y + margin_top
 
     fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi)
 
+    # Compute bottom coordinate in inches for each row r (r = 0 is topmost, r = n_rows - 1 is bottommost)
+    b_in_list = [0.0] * n_rows
+    b_in_list[n_rows - 1] = margin_bottom
+    for r in range(n_rows - 2, -1, -1):
+        b_in_list[r] = b_in_list[r + 1] + plot_size + row_gaps[r]
+
     axes = np.empty((n_rows, n_cols), dtype=object)
     for r in range(n_rows):
-        # r = 0 is the topmost row (Human row if present)
-        # r = n_rows - 1 is the bottommost row
-        if has_custom_human_gap:
-            if r == 0:
-                b_in = margin_bottom + (n_rows - 1) * plot_size + (n_rows - 2) * gap_y + gap_human
-            else:
-                row_from_bottom = n_rows - 1 - r
-                b_in = margin_bottom + row_from_bottom * (plot_size + gap_y)
-        else:
-            row_from_bottom = n_rows - 1 - r
-            b_in = margin_bottom + row_from_bottom * (plot_size + gap_y)
-
+        b_in = b_in_list[r]
         for c in range(n_cols):
             l_in = margin_left + c * (plot_size + gap_x)
             ax = fig.add_axes([
@@ -463,11 +521,25 @@ def plot_loss_linear_fits(
 
             # 2. Linear fit line and R^2
             if show_fit:
-                reg = linregress(x_indices, means_arr)
-                r2 = reg.rvalue ** 2
+                if anchor_zero:
+                    x0 = float(x_indices[0])
+                    u = x_indices - x0
+                    denom = float(np.sum(u ** 2))
+                    slope = float(np.sum(u * means_arr) / denom) if denom > 0 else 0.0
+                    y_pred = slope * u
+                    ss_res = float(np.sum((means_arr - y_pred) ** 2))
+                    ss_tot = float(np.sum((means_arr - np.mean(means_arr)) ** 2))
+                    r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 1.0
 
-                x_line = np.linspace(-0.25, 4.25, 100)
-                y_line = reg.slope * x_line + reg.intercept
+                    x_line = np.linspace(x0, 4.25, 100)
+                    y_line = slope * (x_line - x0)
+                else:
+                    reg = linregress(x_indices, means_arr)
+                    r2 = reg.rvalue ** 2
+
+                    x_line = np.linspace(-0.25, 4.25, 100)
+                    y_line = reg.slope * x_line + reg.intercept
+
                 ax.plot(
                     x_line,
                     y_line,
@@ -570,37 +642,21 @@ def plot_loss_linear_fits(
             ax.grid(True, which="major", linestyle=":", color="#999999", alpha=0.7, linewidth=0.7)
             ax.set_axisbelow(True)
 
-    # Subtle dashed separator line centered between Human Listeners benchmark and subsequent rows
-    if has_custom_human_gap:
-        row0_bottom = margin_bottom + (n_rows - 1) * plot_size + (n_rows - 2) * gap_y + gap_human
-        row1_top = margin_bottom + (n_rows - 2) * (plot_size + gap_y) + plot_size
-        sep_human_in = (row0_bottom + row1_top) / 2.0
-        sep_human_norm = sep_human_in / fig_h
-        fig.add_artist(
-            plt.Line2D(
-                [margin_left / fig_w, 1.0 - (margin_right / fig_w)],
-                [sep_human_norm, sep_human_norm],
-                color="#888888",
-                linestyle="--",
-                linewidth=1.2,
-                alpha=0.8,
+    # Subtle dashed separator lines centered between Human benchmark and between representation groups
+    for r in range(n_rows - 1):
+        if has_separator[r]:
+            sep_y_in = (b_in_list[r] + b_in_list[r + 1] + plot_size) / 2.0
+            sep_y_norm = sep_y_in / fig_h
+            fig.add_artist(
+                plt.Line2D(
+                    [margin_left / fig_w, 1.0 - (margin_right / fig_w)],
+                    [sep_y_norm, sep_y_norm],
+                    color="#888888",
+                    linestyle="--",
+                    linewidth=1.2,
+                    alpha=0.8,
+                )
             )
-        )
-
-    # In 'all' mode: draw subtle dashed line separating individual models from aggregated groups
-    if plot_mode == "all":
-        sep_y_in = margin_bottom + 3 * (plot_size + gap_y) - (gap_y / 2.0)
-        sep_y_norm = sep_y_in / fig_h
-        fig.add_artist(
-            plt.Line2D(
-                [margin_left / fig_w, 1.0 - (margin_right / fig_w)],
-                [sep_y_norm, sep_y_norm],
-                color="#888888",
-                linestyle="--",
-                linewidth=1.2,
-                alpha=0.8,
-            )
-        )
 
     # Common X-axis label centered at the bottom
     axes[n_rows - 1, 1].set_xlabel("Modulation amount", fontsize=11.5, fontweight="bold", labelpad=5)
@@ -667,13 +723,14 @@ def main():
         nargs="?",
         const="data/listening_test_responses_postprocessed.tsv",
         default="data/listening_test_responses_postprocessed.tsv",
+        # default=None,
         dest="human_data",
         help="Optional path to postprocessed human listening responses TSV (default when flag used without argument: data/listening_test_responses_postprocessed.tsv). When provided, human ratings are graphed as the first row.",
     )
     parser.add_argument(
         "-o",
         "--output",
-        default="../../out/figure_loss_linear_fit.png",
+        default="../../out/figure_loss_linear_fit.pdf",
         help="Path to save figure image (default: figures/figure_loss_linear_fit.png). Supports .png, .pdf, .svg, etc.",
     )
     parser.add_argument(
@@ -681,6 +738,16 @@ def main():
         choices=["losses", "groups", "all"],
         default="losses",
         help="Plotting mode: 'losses' (individual loss function rows), 'groups' (3 aggregated rows: STFT, Wavelet, Neural), or 'all'. Default: losses.",
+    )
+    parser.add_argument(
+        "--loss-fn",
+        "--loss-fns",
+        "-l",
+        nargs="+",
+        default=None,
+        # default=["mss_log_lin", "mss_rev", "mfcc", "scat1d_log1p", "jtfs_log1p"],
+        # default=["vggish", "encodec48k", "clap2", "panns_wavegram_logmel"],
+        help="Filter analysis to specific loss function(s) (e.g. -l mfcc mss_log_lin)",
     )
     parser.add_argument(
         "--normalize",
@@ -695,6 +762,16 @@ def main():
         dest="show_fit",
         default=True,
         help="Do not display linear line of best fit and R^2 value annotation.",
+    )
+    parser.add_argument(
+        "--anchor-zero",
+        "--anchor-origin",
+        "--anchor-first",
+        "--anchor",
+        action="store_true",
+        dest="anchor_zero",
+        default=True,
+        help="Anchor the linear line of best fit to pass through y=0 at the first x value.",
     )
     parser.add_argument(
         "--connect-dots",
@@ -772,7 +849,15 @@ def main():
         type=float,
         default=0.32,
         dest="gap_human",
-        help="Vertical gap between the human benchmark row and subsequent model rows in inches (default: 0.16).",
+        help="Vertical gap between the human benchmark row and subsequent model rows in inches (default: 0.32).",
+    )
+    parser.add_argument(
+        "--gap-group",
+        "--group-gap",
+        type=float,
+        default=0.32,
+        dest="gap_group",
+        help="Vertical gap between representation groups in inches (default: 0.32).",
     )
     parser.add_argument(
         "--ci-level",
@@ -830,8 +915,10 @@ def main():
     plot_loss_linear_fits(
         df=df_dist,
         plot_mode=args.plot,
+        loss_fns=args.loss_fn,
         normalize=args.normalize,
         show_fit=args.show_fit,
+        anchor_zero=args.anchor_zero,
         connect_dots=args.connect_dots,
         error_mode=args.error_bars,
         error_style=args.error_style,
@@ -844,6 +931,7 @@ def main():
         gap_x=args.gap_x,
         gap_y=args.gap_y,
         gap_human=args.gap_human,
+        gap_group=args.gap_group,
         line_color=args.line_color,
         marker_color=args.marker_color,
         r2_decimals=args.r2_decimals,

@@ -11,7 +11,7 @@ When only 2 factors remain without explicit interaction terms, the residual vari
 the confounded 2-way interaction and is labeled '2-Way Inter.' with the matching interaction color.
 
 Supports both horizontal and vertical orientations, with configurable white space between
-individual loss functions and method groups.
+individual loss functions, method groups, human data, bottom bar and x-axis, and between the legend and graph.
 """
 
 from __future__ import annotations
@@ -28,16 +28,16 @@ import pandas as pd
 
 # Method ordering matching correlation and ANOVA tables
 ENTITIES = [
-    ("human", "Human Listeners", "human"),
-    ("mss_log_lin", "MSS Log + Lin.", "group1"),
-    ("mss_rev", "MSS Revisited", "group1"),
+    ("human", "Human\nListeners", "human"),
+    ("mss_log_lin", "MSS Log\n+ Linear", "group1"),
+    ("mss_rev", "MSS Rev.", "group1"),
     ("mfcc", "MFCC", "group1"),
     ("scat1d_log1p", "Scat1D", "group2"),
     ("jtfs_log1p", "JTFS", "group2"),
     ("vggish", "VGGish", "group3"),
-    ("encodec48k", "EnCodec 48kHz", "group3"),
+    ("encodec48k", "EnCodec\n48 kHz", "group3"),
     ("clap2", "MS-CLAP", "group3"),
-    ("panns_wavegram_logmel", "PANNs WGLM", "group3"),
+    ("panns_wavegram_logmel", "PANNs\nWGLM", "group3"),
 ]
 
 LOSS_FN_ALIASES = {
@@ -53,10 +53,10 @@ LOSS_FN_ALIASES = {
 # The canonical variance components, display labels, and distinct harmonious colors
 COMPONENTS = [
     ("distance", "Distance", "#2b5c8f"),        # Deep Steel Blue
-    ("mod", "Mod. Type", "#3399a1"),         # Cyan / Teal
-    ("feat", "Feature", "#f39c12"),          # Amber / Orange
+    ("mod", "Modulation Type", "#3399a1"),         # Cyan / Teal
+    ("feat", "Timbre Quality", "#f39c12"),          # Amber / Orange
     ("source", "Source", "#d9534f"),         # Coral / Crimson
-    ("two_way", "2-Way Inter.", "#8e44ad"),  # Amethyst Purple
+    ("two_way", "2-Way Interactions", "#8e44ad"),  # Amethyst Purple
     ("higher_order", "Higher Order", "#7f8c8d"),  # Slate Gray
 ]
 
@@ -87,19 +87,19 @@ def load_variance_data(
     if "rating_stimulus" in present_sources:
         candidate_components.append(("distance", distance_label, "#2b5c8f"))
     if "modulation" in present_sources:
-        candidate_components.append(("mod", "Mod. Type", "#3399a1"))
+        candidate_components.append(("mod", "Modulation Type", "#3399a1"))
     if "feature" in present_sources:
-        candidate_components.append(("feat", "Feature", "#f39c12"))
+        candidate_components.append(("feat", "Timbre Quality", "#f39c12"))
     if "source" in present_sources:
         candidate_components.append(("source", "Source", "#d9534f"))
 
     # If explicit 2-way terms exist OR if residual in 2-factor design represents the 2-way interaction
     residual_is_two_way = has_residual and not has_two_way and not has_three_way
     if has_two_way or residual_is_two_way:
-        candidate_components.append(("two_way", "2-Way Inter.", "#8e44ad"))
+        candidate_components.append(("two_way", "2-Way Interactions", "#8e44ad"))
 
     if has_three_way:
-        candidate_components.append(("three_way", "3-Way Inter.", "#9b59b6"))
+        candidate_components.append(("three_way", "3-Way Interactions", "#9b59b6"))
 
     if has_residual and not residual_is_two_way:
         candidate_components.append(("higher_order", "Higher Order", "#7f8c8d"))
@@ -161,6 +161,7 @@ def compute_positions(
     bar_size: float = 0.65,
     bar_spacing: float = 0.35,
     group_spacing: float = 0.35,
+    human_spacing: Optional[float] = None,
 ) -> tuple[np.ndarray, float]:
     """Compute center coordinates for each bar and the human separator line position.
 
@@ -169,30 +170,42 @@ def compute_positions(
         bar_size: Thickness of each bar.
         bar_spacing: Whitespace gap between consecutive loss function bars.
         group_spacing: Additional whitespace gap between loss function groups.
+        human_spacing: Additional whitespace gap between human data and model representations
+            (defaults to group_spacing if not specified).
 
     Returns:
         positions: Coordinate array for bar centers.
         separator_pos: Coordinate midway between Human Listeners and the first model.
     """
+    effective_human_spacing = human_spacing if human_spacing is not None else group_spacing
     positions = []
     current_pos = 0.0
     step = bar_size + bar_spacing
-    separator_pos = step / 2.0
+    separator_pos = (step + effective_human_spacing) / 2.0
 
     for i, grp in enumerate(groups):
         if i == 0:
             positions.append(0.0)
             current_pos = 0.0
-        elif i == 1:
-            current_pos += step
-            positions.append(current_pos)
-            separator_pos = current_pos / 2.0
         else:
             delta = step
-            if grp != groups[i - 1]:
+            if groups[i - 1] == "human" or grp == "human":
+                delta += effective_human_spacing
+            elif grp != groups[i - 1]:
                 delta += group_spacing
             current_pos += delta
             positions.append(current_pos)
+
+    if len(positions) > 1 and "human" in groups:
+        human_idx = groups.index("human")
+        if human_idx == 0:
+            separator_pos = (positions[0] + positions[1]) / 2.0
+        elif human_idx == len(groups) - 1:
+            separator_pos = (positions[-2] + positions[-1]) / 2.0
+        else:
+            separator_pos = (positions[human_idx] + positions[human_idx + 1]) / 2.0
+    elif len(positions) > 1:
+        separator_pos = (positions[0] + positions[1]) / 2.0
 
     return np.array(positions), separator_pos
 
@@ -206,6 +219,9 @@ def plot_variance_horizontal(
     bar_size: float = 0.65,
     bar_spacing: float = 0.35,
     group_spacing: float = 0.35,
+    human_spacing: Optional[float] = None,
+    bottom_spacing: Optional[float] = None,
+    legend_y: Optional[float] = None,
     show_labels: bool = True,
     label_threshold: float = 4.5,
     title: Optional[str] = None,
@@ -226,6 +242,7 @@ def plot_variance_horizontal(
         bar_size=bar_size,
         bar_spacing=bar_spacing,
         group_spacing=group_spacing,
+        human_spacing=human_spacing,
     )
 
     n_bars = len(labels)
@@ -268,12 +285,16 @@ def plot_variance_horizontal(
         cum_left += vals
 
     # Format y-axis (invert so Human Listeners is at the top)
+    bot_pad = bottom_spacing if bottom_spacing is not None else 0.55
+    if bot_pad <= 0.3:
+        bot_pad = 0.5 + bot_pad
+
     ax.set_yticks(y_pos)
     ax.set_yticklabels(labels, fontsize=10.5)
-    ax.set_ylim(y_pos[-1] + bar_size * 0.8, y_pos[0] - bar_size * 0.8)
+    ax.set_ylim(y_pos[-1] + bar_size * bot_pad, y_pos[0] - bar_size * 0.60)
 
     # Visual separator line between Human Listeners and model representations
-    if len(labels) > 1:
+    if len(labels) > 1 and "human" in groups:
         ax.axhline(separator_pos, color="#777777", linestyle="--", linewidth=1.0, alpha=0.7)
 
     # Format x-axis
@@ -291,19 +312,21 @@ def plot_variance_horizontal(
 
     # Legend at the top dynamically scaled to number of components
     ncol = len(comps_to_plot)
+    effective_legend_y = legend_y if legend_y is not None else 1.005
     ax.legend(
         loc="lower center",
-        bbox_to_anchor=(0.5, 1.02),
+        bbox_to_anchor=(0.5, effective_legend_y),
         ncol=ncol,
         frameon=False,
         fontsize=9.5,
         columnspacing=1.2,
         handlelength=1.2,
         handleheight=0.9,
+        borderaxespad=0.2,
     )
 
     if title:
-        fig.suptitle(title, fontsize=12.5, fontweight="bold", y=1.08)
+        fig.suptitle(title, fontsize=12.5, fontweight="bold", y=1.06)
 
     plt.tight_layout()
 
@@ -327,6 +350,8 @@ def plot_variance_vertical(
     bar_size: float = 0.65,
     bar_spacing: float = 0.35,
     group_spacing: float = 0.35,
+    human_spacing: Optional[float] = None,
+    legend_y: Optional[float] = None,
     show_labels: bool = True,
     label_threshold: float = 4.5,
     title: Optional[str] = None,
@@ -347,6 +372,7 @@ def plot_variance_vertical(
         bar_size=bar_size,
         bar_spacing=bar_spacing,
         group_spacing=group_spacing,
+        human_spacing=human_spacing,
     )
 
     n_bars = len(labels)
@@ -394,7 +420,7 @@ def plot_variance_vertical(
     ax.set_xlim(x_pos[0] - bar_size * 0.8, x_pos[-1] + bar_size * 0.8)
 
     # Visual separator line between Human Listeners and model representations
-    if len(labels) > 1:
+    if len(labels) > 1 and "human" in groups:
         ax.axvline(separator_pos, color="#777777", linestyle="--", linewidth=1.0, alpha=0.7)
 
     # Format y-axis
@@ -412,19 +438,21 @@ def plot_variance_vertical(
 
     # Legend at the top dynamically scaled to number of components
     ncol = len(comps_to_plot)
+    effective_legend_y = legend_y if legend_y is not None else 1.01
     ax.legend(
         loc="lower center",
-        bbox_to_anchor=(0.5, 1.02),
+        bbox_to_anchor=(0.5, effective_legend_y),
         ncol=ncol,
         frameon=False,
         fontsize=9.5,
         columnspacing=1.2,
         handlelength=1.2,
         handleheight=0.9,
+        borderaxespad=0.25,
     )
 
     if title:
-        fig.suptitle(title, fontsize=12.5, fontweight="bold", y=1.08)
+        fig.suptitle(title, fontsize=12.5, fontweight="bold", y=1.06)
 
     plt.tight_layout()
 
@@ -533,16 +561,44 @@ def main():
         "--spacing",
         "--bar-spacing",
         type=float,
-        default=0.10,
+        default=0.0,
         dest="bar_spacing",
-        help="Whitespace gap between adjacent loss function bars (default: 0.10).",
+        help="Whitespace gap between adjacent loss function bars (default: 0.0).",
     )
     parser.add_argument(
         "--group-spacing",
         type=float,
-        default=0.0,
+        default=0.1,
         dest="group_spacing",
-        help="Additional whitespace gap between loss function groups (default: 0.0).",
+        help="Additional whitespace gap between loss function groups (default: 0.2).",
+    )
+    parser.add_argument(
+        "--human-spacing",
+        "--spacing-human",
+        "--human-gap",
+        "--gap-human",
+        type=float,
+        default=0.2,
+        dest="human_spacing",
+        help="Additional whitespace gap between human data and model representations (default: same as --group-spacing, i.e. 0.2).",
+    )
+    parser.add_argument(
+        "--bottom-spacing",
+        "--bottom-pad",
+        "--bottom-margin",
+        type=float,
+        default=0.2,
+        dest="bottom_spacing",
+        help="Whitespace padding between the lowest bar and the x-axis in horizontal mode (default: 0.55, where 0.5 is the bar boundary).",
+    )
+    parser.add_argument(
+        "--legend-spacing",
+        "--legend-gap",
+        "--legend-y",
+        type=float,
+        default=None,
+        dest="legend_y",
+        help="Vertical position/offset of legend above the graph (default: 1.005 for horizontal, 1.01 for vertical).",
     )
     parser.add_argument(
         "--bar-size",
@@ -599,6 +655,11 @@ def main():
     elif args.horizontal:
         orientation = "horizontal"
 
+    # Resolve legend_y
+    legend_y = args.legend_y
+    if legend_y is not None and legend_y <= 0.5:
+        legend_y = 1.0 + legend_y
+
     # Resolve output path
     repo_root = Path(__file__).resolve().parent.parent.parent
     if args.output:
@@ -606,12 +667,12 @@ def main():
     else:
         stem = input_path.stem
         if stem == "anova_variance_results":
-            out_path = (repo_root / "out" / "figure_variance.png").resolve()
+            out_path = (repo_root / "out" / "figure_variance.pdf").resolve()
         elif stem.startswith("anova_variance_results_"):
             suffix = stem[len("anova_variance_results_"):]
-            out_path = (repo_root / "out" / f"figure_variance_{suffix}.png").resolve()
+            out_path = (repo_root / "out" / f"figure_variance_{suffix}.pdf").resolve()
         else:
-            out_path = (repo_root / "out" / f"figure_{stem}.png").resolve()
+            out_path = (repo_root / "out" / f"figure_{stem}.pdf").resolve()
 
     should_show = not args.no_show
 
@@ -625,6 +686,9 @@ def main():
             bar_size=args.bar_size,
             bar_spacing=args.bar_spacing,
             group_spacing=args.group_spacing,
+            human_spacing=args.human_spacing,
+            bottom_spacing=args.bottom_spacing,
+            legend_y=legend_y,
             show_labels=not args.no_labels,
             label_threshold=args.threshold,
             title=args.title,
@@ -641,6 +705,8 @@ def main():
             bar_size=args.bar_size,
             bar_spacing=args.bar_spacing,
             group_spacing=args.group_spacing,
+            human_spacing=args.human_spacing,
+            legend_y=legend_y,
             show_labels=not args.no_labels,
             label_threshold=args.threshold,
             title=args.title,
