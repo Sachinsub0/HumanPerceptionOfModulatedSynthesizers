@@ -12,6 +12,10 @@ this script treats each metric evaluation as an unreplicated factorial design ac
 
 Total cells = 3 x 3 x 2 x 4 = 72 observations per evaluation metric.
 
+Optionally allows pooling ratings / distances across one or more factors before
+computing and displaying the variance analysis (e.g. pooling across feature and source
+leaves only modulation and rating_stimulus as main factors).
+
 ANOVA is computed via statsmodels.api.stats.anova_lm.
 Vectorized effect sizes (np2, eta_sq) match pingouin.anova implementations.
 Multiple hypothesis corrections (Bonferroni & Benjamini-Hochberg FDR) are computed via
@@ -34,6 +38,83 @@ from statsmodels.stats.multitest import multipletests
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger(__name__)
 log.setLevel(level=os.environ.get("LOGLEVEL", "INFO"))
+
+ALL_FACTORS: list[str] = ["modulation", "feature", "source", "rating_stimulus"]
+
+FACTOR_ALIASES: dict[str, str] = {
+    "modulation": "modulation",
+    "mod": "modulation",
+    "mod_type": "modulation",
+    "feature": "feature",
+    "feat": "feature",
+    "source": "source",
+    "src": "source",
+    "rating_stimulus": "rating_stimulus",
+    "stimulus": "rating_stimulus",
+    "amount": "rating_stimulus",
+    "amt": "rating_stimulus",
+    "rating": "rating_stimulus",
+}
+
+FACTOR_DISPLAY_NAMES: dict[str, str] = {
+    "rating_stimulus": "% Var (Amount)",
+    "modulation": "% Var (Modulation)",
+    "feature": "% Var (Feature)",
+    "source": "% Var (Source)",
+}
+
+DISPLAY_FACTOR_ORDER: list[str] = [
+    "rating_stimulus",
+    "modulation",
+    "feature",
+    "source",
+]
+
+
+def normalize_pool_factors(raw_factors: list[str] | None) -> list[str]:
+    """Normalize and validate factors to pool over."""
+    if not raw_factors:
+        return []
+
+    pooled: list[str] = []
+    for item in raw_factors:
+        for f in item.replace(",", " ").split():
+            clean = f.strip().lower()
+            if not clean:
+                continue
+            if clean not in FACTOR_ALIASES:
+                valid = sorted(set(FACTOR_ALIASES.values()))
+                raise ValueError(
+                    f"Unknown factor '{clean}'. Valid factors are: {valid} "
+                    f"(aliases accepted: {list(FACTOR_ALIASES.keys())})"
+                )
+            canon = FACTOR_ALIASES[clean]
+            if canon not in pooled:
+                pooled.append(canon)
+
+    remaining = [f for f in ALL_FACTORS if f not in pooled]
+    if len(remaining) < 2:
+        raise ValueError(
+            f"Cannot pool over {pooled}. At least 2 factors must remain for unreplicated factorial ANOVA, "
+            f"but only {len(remaining)} remained: {remaining}."
+        )
+
+    return pooled
+
+
+def pool_data(df_data: pd.DataFrame, remaining_factors: list[str]) -> pd.DataFrame:
+    """Pool ratings/distances across non-selected factors by taking cell means across remaining factors."""
+    if set(remaining_factors) == set(ALL_FACTORS):
+        return df_data
+
+    pooled = (
+        df_data.groupby(remaining_factors, as_index=False)["distance"]
+        .mean()
+    )
+    if "loss_fn" in df_data.columns:
+        pooled["loss_fn"] = df_data["loss_fn"].iloc[0]
+
+    return pooled
 
 
 def parse_wavetable(wt: str) -> tuple[str, str]:
@@ -115,6 +196,7 @@ def load_human_data(data_path: Path) -> pd.DataFrame:
 
 def compute_interaction_pooled_anova(
     df_data: pd.DataFrame,
+    factors: list[str] | None = None,
     max_interaction: int = 2,
     dv: str = "distance",
 ) -> pd.DataFrame:
@@ -124,10 +206,21 @@ def compute_interaction_pooled_anova(
     Effect sizes (np2, eta_sq) and multiple testing corrections (p_bonf, p_fdr)
     are calculated using vectorized operations equivalent to pingouin and statsmodels.stats.multitest.
     """
-    if max_interaction not in (2, 3):
-        raise ValueError("max_interaction must be 2 or 3")
+    if factors is None:
+        factors = list(ALL_FACTORS)
 
-    formula = f"{dv} ~ (C(modulation) + C(feature) + C(source) + C(rating_stimulus))**{max_interaction}"
+    effective_max_interaction = min(max_interaction, len(factors) - 1)
+    if effective_max_interaction < 1:
+        raise ValueError(
+            f"At least 2 factors are required for unreplicated interaction-pooled ANOVA; got {len(factors)}."
+        )
+
+    factor_terms = " + ".join(f"C({f})" for f in factors)
+    if effective_max_interaction == 1:
+        formula = f"{dv} ~ {factor_terms}"
+    else:
+        formula = f"{dv} ~ ({factor_terms})**{effective_max_interaction}"
+
     model = ols(formula, data=df_data).fit()
 
     # Core ANOVA table from statsmodels
@@ -170,7 +263,6 @@ def compute_interaction_pooled_anova(
     # Multiple hypothesis testing corrections:
     # 1. Bonferroni (controls Family-Wise Error Rate, FWER)
     # 2. Benjamini-Hochberg (controls False Discovery Rate, FDR)
-    # mask = aov["p_unc"].notna()
     mask = (
         aov["p_unc"].notna()
         & (aov["Source"] != "Residual (pooled)")
@@ -230,25 +322,28 @@ def format_table_for_display(df: pd.DataFrame) -> pd.DataFrame:
 def extract_variance_record(
     res_df: pd.DataFrame,
     label: str,
-    max_interaction: int = 2,
+    factors: list[str] | None = None,
 ) -> dict[str, float | str]:
     """Extract variance decomposition percentages from an ANOVA result DataFrame."""
-    term_map = dict(zip(res_df["Source"], res_df["pct_var"]))
-    two_way_terms = [k for k in term_map if k.count(":") == 1]
-    two_way_pct = sum(term_map[k] for k in two_way_terms)
+    if factors is None:
+        factors = list(ALL_FACTORS)
 
-    rec: dict[str, float | str] = {
-        "Metric": label,
-        "% Var (Amount)": term_map.get("rating_stimulus", 0.0),
-        "% Var (Modulation)": term_map.get("modulation", 0.0),
-        "% Var (Feature)": term_map.get("feature", 0.0),
-        "% Var (Source)": term_map.get("source", 0.0),
-        "% Var (2-Way Inter.)": two_way_pct,
-    }
-    if max_interaction >= 3:
-        three_way_terms = [k for k in term_map if k.count(":") == 2]
-        three_way_pct = sum(term_map[k] for k in three_way_terms)
-        rec["% Var (3-Way Inter.)"] = three_way_pct
+    term_map = dict(zip(res_df["Source"], res_df["pct_var"]))
+    rec: dict[str, float | str] = {"Metric": label}
+
+    for factor in DISPLAY_FACTOR_ORDER:
+        if factor in factors:
+            disp_col = FACTOR_DISPLAY_NAMES[factor]
+            rec[disp_col] = term_map.get(factor, 0.0)
+
+    two_way_terms = [k for k in term_map if k.count(":") == 1]
+    if two_way_terms:
+        rec["% Var (2-Way Inter.)"] = sum(term_map[k] for k in two_way_terms)
+
+    three_way_terms = [k for k in term_map if k.count(":") == 2]
+    if three_way_terms:
+        rec["% Var (3-Way Inter.)"] = sum(term_map[k] for k in three_way_terms)
+
     rec["% Var (Residual)"] = term_map.get("Residual (pooled)", 0.0)
     return rec
 
@@ -258,9 +353,25 @@ def run_variance_analysis(
     human_data_path: Path | None = None,
     output_path: Path | None = None,
     loss_fns: list[str] | None = None,
+    pool_factors: list[str] | None = None,
     max_interaction: int = 2,
 ):
     """Run interaction-pooled ANOVA and variance decomposition for loss functions & human ratings."""
+    normalized_pool = normalize_pool_factors(pool_factors)
+    remaining_factors = [f for f in ALL_FACTORS if f not in normalized_pool]
+    effective_max_interaction = min(max_interaction, len(remaining_factors) - 1)
+
+    if normalized_pool:
+        log.info(
+            f"Pooling ratings/distances across factor(s): {normalized_pool}. "
+            f"Remaining ANOVA factors: {remaining_factors}"
+        )
+        if max_interaction > effective_max_interaction:
+            log.info(
+                f"Clamping max_interaction from {max_interaction} to {effective_max_interaction} "
+                f"to ensure residual degrees of freedom."
+            )
+
     log.info(f"Loading distance data from: {data_path}")
     df = pd.read_csv(data_path, sep="\t")
 
@@ -274,7 +385,8 @@ def run_variance_analysis(
         selected_losses = all_losses
 
     log.info(
-        f"Analyzing {len(selected_losses)} loss functions with max_interaction={max_interaction}..."
+        f"Analyzing {len(selected_losses)} loss functions with max_interaction={effective_max_interaction} "
+        f"across factors: {remaining_factors}..."
     )
 
     results_by_loss: dict[str, pd.DataFrame] = {}
@@ -284,33 +396,56 @@ def run_variance_analysis(
     if human_data_path and human_data_path.exists():
         log.info(f"Loading human listening benchmark data from: {human_data_path}")
         df_human = load_human_data(human_data_path)
+        df_human_pooled = pool_data(df_human, remaining_factors)
         human_res = compute_interaction_pooled_anova(
-            df_human, max_interaction=max_interaction, dv="distance"
+            df_human_pooled,
+            factors=remaining_factors,
+            max_interaction=effective_max_interaction,
+            dv="distance",
         )
         results_by_loss["human"] = human_res
         human_record = extract_variance_record(
             human_res,
             label="Human Listeners (Reference)",
-            max_interaction=max_interaction,
+            factors=remaining_factors,
         )
 
     # 2. Process algorithmic loss functions
     loss_summary_records = []
     for loss in selected_losses:
         sub = prepare_loss_data(df, loss)
+        sub_pooled = pool_data(sub, remaining_factors)
         res_df = compute_interaction_pooled_anova(
-            sub, max_interaction=max_interaction, dv="distance"
+            sub_pooled,
+            factors=remaining_factors,
+            max_interaction=effective_max_interaction,
+            dv="distance",
         )
         results_by_loss[loss] = res_df
         loss_summary_records.append(
-            extract_variance_record(res_df, label=loss, max_interaction=max_interaction)
+            extract_variance_record(
+                res_df,
+                label=loss,
+                factors=remaining_factors,
+            )
         )
 
-    sep_bar = "=" * 135
+    if normalized_pool:
+        header_title = (
+            f"INTERACTION-POOLED ANOVA & VARIANCE DECOMPOSITION "
+            f"(POOLED OVER: {', '.join(normalized_pool).upper()} | "
+            f"REMAINING: {', '.join(remaining_factors).upper()} | "
+            f"Pooled Order: >{effective_max_interaction}-Way)"
+        )
+    else:
+        header_title = (
+            f"INTERACTION-POOLED ANOVA & VARIANCE DECOMPOSITION "
+            f"(Pooled Order: >{effective_max_interaction}-Way)"
+        )
+
+    sep_bar = "=" * max(135, len(header_title))
     log.info("\n" + sep_bar)
-    log.info(
-        f"INTERACTION-POOLED ANOVA & VARIANCE DECOMPOSITION (Pooled Order: >{max_interaction}-Way)"
-    )
+    log.info(header_title)
     log.info(sep_bar)
 
     # Print human benchmark detailed ANOVA first if present
@@ -325,9 +460,14 @@ def run_variance_analysis(
         disp_df = format_table_for_display(results_by_loss[loss])
         log.info("\n" + disp_df.to_string(index=False))
 
-    # Summary table: Sort loss functions by modulation amount sensitivity (% Var Amount)
+    # Summary table: Sort loss functions by modulation amount sensitivity (% Var Amount) if present, else first metric
     summary_df = pd.DataFrame(loss_summary_records)
-    summary_df = summary_df.sort_values("% Var (Amount)", ascending=False).reset_index(
+    sort_col = (
+        "% Var (Amount)"
+        if "% Var (Amount)" in summary_df.columns
+        else [c for c in summary_df.columns if c != "Metric"][0]
+    )
+    summary_df = summary_df.sort_values(sort_col, ascending=False).reset_index(
         drop=True
     )
 
@@ -408,11 +548,26 @@ def main():
         help="Filter analysis to specific loss function(s) (e.g. -l mfcc mss_log_lin)",
     )
     parser.add_argument(
+        "--pool-factors",
+        "--pool",
+        "--pool-over",
+        nargs="+",
+        default=None,
+        # default=["source"],
+        # default=["feature"],
+        # default=["feature", "source"],
+        help=(
+            "Factor(s) to pool ratings / distances across before computing variance analysis "
+            "(choices: 'feature', 'source', 'modulation', 'rating_stimulus'; aliases: 'amount', 'mod', 'feat', 'src'). "
+            "For example: --pool-factors feature source"
+        ),
+    )
+    parser.add_argument(
         "--max-interaction",
         type=int,
         default=2,
-        choices=[2, 3],
-        help="Maximum interaction order to include (2: pool 3-way & 4-way, 3: pool 4-way; default: 2)",
+        choices=[1, 2, 3],
+        help="Maximum interaction order to include (default: 2; automatically clamped if fewer factors remain)",
     )
     args = parser.parse_args()
 
@@ -421,6 +576,7 @@ def main():
         human_data_path=Path(args.human_data) if args.human_data else None,
         output_path=Path(args.output) if args.output else None,
         loss_fns=args.loss_fn,
+        pool_factors=args.pool_factors,
         max_interaction=args.max_interaction,
     )
 

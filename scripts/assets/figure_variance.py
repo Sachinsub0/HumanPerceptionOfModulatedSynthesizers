@@ -1,10 +1,17 @@
 """Generate publication-ready bar graph of ANOVA variance decompositions.
 
-Reads data/anova_variance_results.tsv and generates a stacked bar chart
-decomposing total variance across 6 components (Distance, Modulation Type,
-Feature, Source, 2-Way Interactions, and Higher-Order Residual), with distinct
-colors for each component. Supports both horizontal and vertical orientations,
-with configurable white space between individual loss functions and method groups.
+Reads data/anova_variance_results.tsv, data/anova_variance_results_pooled_source.tsv,
+or data/anova_variance_results_pooled_timbre_source.tsv and generates a stacked bar chart
+decomposing total variance across factorial components (Distance/Amount, Modulation Type,
+Feature, Source, 2-Way Interactions, and Higher-Order Residual), with distinct harmonious
+colors for each component.
+
+Dynamically adapts active components and legend depending on whether factors were pooled.
+When only 2 factors remain without explicit interaction terms, the residual variance represents
+the confounded 2-way interaction and is labeled '2-Way Inter.' with the matching interaction color.
+
+Supports both horizontal and vertical orientations, with configurable white space between
+individual loss functions and method groups.
 """
 
 from __future__ import annotations
@@ -43,7 +50,7 @@ LOSS_FN_ALIASES = {
     "panns_wglm": "panns_wavegram_logmel",
 }
 
-# The 6 variance components, display labels, and distinct harmonious colors
+# The canonical variance components, display labels, and distinct harmonious colors
 COMPONENTS = [
     ("distance", "Distance", "#2b5c8f"),        # Deep Steel Blue
     ("mod", "Mod. Type", "#3399a1"),         # Cyan / Teal
@@ -56,17 +63,54 @@ COMPONENTS = [
 
 def load_variance_data(
     tsv_path: Path,
-) -> tuple[list[str], dict[str, list[float]], list[str]]:
-    """Load and organize variance components for each entity from TSV."""
+    distance_label: str = "Distance",
+) -> tuple[list[str], dict[str, list[float]], list[str], list[tuple[str, str, str]]]:
+    """Load and organize variance components for each entity from TSV.
+
+    Dynamically detects active factors and interactions, omitting pooled factors.
+    In an unreplicated 2-factor design, the residual variance represents the 2-way
+    interaction and is categorized as '2-Way Inter.'.
+    """
     sep = "\t" if tsv_path.suffix in [".tsv", ".txt"] else ","
     df = pd.read_csv(tsv_path, sep=sep)
 
     if "loss_fn" in df.columns:
         df["canonical_loss"] = df["loss_fn"].map(lambda x: LOSS_FN_ALIASES.get(x, x))
 
+    present_sources = set(df["Source"].dropna().unique())
+    has_two_way = any(k.count(":") == 1 for k in present_sources)
+    has_three_way = any(k.count(":") == 2 for k in present_sources)
+    has_residual = any("Residual" in k for k in present_sources)
+
+    # Determine potential active components dynamically based on input sources
+    candidate_components: list[tuple[str, str, str]] = []
+    if "rating_stimulus" in present_sources:
+        candidate_components.append(("distance", distance_label, "#2b5c8f"))
+    if "modulation" in present_sources:
+        candidate_components.append(("mod", "Mod. Type", "#3399a1"))
+    if "feature" in present_sources:
+        candidate_components.append(("feat", "Feature", "#f39c12"))
+    if "source" in present_sources:
+        candidate_components.append(("source", "Source", "#d9534f"))
+
+    # If explicit 2-way terms exist OR if residual in 2-factor design represents the 2-way interaction
+    residual_is_two_way = has_residual and not has_two_way and not has_three_way
+    if has_two_way or residual_is_two_way:
+        candidate_components.append(("two_way", "2-Way Inter.", "#8e44ad"))
+
+    if has_three_way:
+        candidate_components.append(("three_way", "3-Way Inter.", "#9b59b6"))
+
+    if has_residual and not residual_is_two_way:
+        candidate_components.append(("higher_order", "Higher Order", "#7f8c8d"))
+
+    # Fallback to standard 6 components if no recognized sources
+    if not candidate_components:
+        candidate_components = list(COMPONENTS)
+
     labels: list[str] = []
     groups: list[str] = []
-    comp_values: dict[str, list[float]] = {k: [] for k, _, _ in COMPONENTS}
+    comp_values: dict[str, list[float]] = {k: [] for k, _, _ in candidate_components}
 
     for canon_key, display_name, grp in ENTITIES:
         match = df[df["canonical_loss"] == canon_key]
@@ -79,17 +123,37 @@ def load_variance_data(
         groups.append(grp)
 
         t_map = dict(zip(match["Source"], match["pct_var"]))
-        two_way_pct = sum(v for k, v in t_map.items() if ":" in k)
-        higher_order_pct = t_map.get("Residual (pooled)", 0.0)
+        two_way_pct = sum(v for k, v in t_map.items() if k.count(":") == 1)
+        three_way_pct = sum(v for k, v in t_map.items() if k.count(":") == 2)
+        residual_pct = next((v for k, v in t_map.items() if "Residual" in k), 0.0)
 
-        comp_values["distance"].append(float(t_map.get("rating_stimulus", 0.0)))
-        comp_values["mod"].append(float(t_map.get("modulation", 0.0)))
-        comp_values["feat"].append(float(t_map.get("feature", 0.0)))
-        comp_values["source"].append(float(t_map.get("source", 0.0)))
-        comp_values["two_way"].append(float(two_way_pct))
-        comp_values["higher_order"].append(float(higher_order_pct))
+        # In an unreplicated 2-factor design, residual is mathematically the 2-way interaction
+        if residual_is_two_way:
+            two_way_pct = residual_pct
 
-    return labels, comp_values, groups
+        for key, _, _ in candidate_components:
+            if key == "distance":
+                comp_values["distance"].append(float(t_map.get("rating_stimulus", 0.0)))
+            elif key == "mod":
+                comp_values["mod"].append(float(t_map.get("modulation", 0.0)))
+            elif key == "feat":
+                comp_values["feat"].append(float(t_map.get("feature", 0.0)))
+            elif key == "source":
+                comp_values["source"].append(float(t_map.get("source", 0.0)))
+            elif key == "two_way":
+                comp_values["two_way"].append(float(two_way_pct))
+            elif key == "three_way":
+                comp_values["three_way"].append(float(three_way_pct))
+            elif key == "higher_order":
+                comp_values["higher_order"].append(float(residual_pct))
+
+    # Keep only components that have non-zero variance in at least one entity
+    active_components = [
+        c for c in candidate_components
+        if any(abs(v) > 1e-4 for v in comp_values[c[0]])
+    ]
+
+    return labels, comp_values, groups, active_components
 
 
 def compute_positions(
@@ -137,6 +201,7 @@ def plot_variance_horizontal(
     labels: list[str],
     comp_values: dict[str, list[float]],
     groups: list[str],
+    components: Optional[list[tuple[str, str, str]]] = None,
     output_path: Optional[Path] = None,
     bar_size: float = 0.65,
     bar_spacing: float = 0.35,
@@ -154,6 +219,8 @@ def plot_variance_horizontal(
         "axes.linewidth": 0.8,
     })
 
+    comps_to_plot = components if components is not None else COMPONENTS
+
     y_pos, separator_pos = compute_positions(
         groups=groups,
         bar_size=bar_size,
@@ -168,7 +235,7 @@ def plot_variance_horizontal(
 
     cum_left = np.zeros(n_bars)
 
-    for key, name, color in COMPONENTS:
+    for key, name, color in comps_to_plot:
         vals = np.array(comp_values[key])
         rects = ax.barh(
             y_pos,
@@ -222,11 +289,12 @@ def plot_variance_horizontal(
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    # Legend at the top
+    # Legend at the top dynamically scaled to number of components
+    ncol = len(comps_to_plot)
     ax.legend(
         loc="lower center",
         bbox_to_anchor=(0.5, 1.02),
-        ncol=6,
+        ncol=ncol,
         frameon=False,
         fontsize=9.5,
         columnspacing=1.2,
@@ -254,6 +322,7 @@ def plot_variance_vertical(
     labels: list[str],
     comp_values: dict[str, list[float]],
     groups: list[str],
+    components: Optional[list[tuple[str, str, str]]] = None,
     output_path: Optional[Path] = None,
     bar_size: float = 0.65,
     bar_spacing: float = 0.35,
@@ -271,6 +340,8 @@ def plot_variance_vertical(
         "axes.linewidth": 0.8,
     })
 
+    comps_to_plot = components if components is not None else COMPONENTS
+
     x_pos, separator_pos = compute_positions(
         groups=groups,
         bar_size=bar_size,
@@ -285,7 +356,7 @@ def plot_variance_vertical(
 
     cum_bottom = np.zeros(n_bars)
 
-    for key, name, color in COMPONENTS:
+    for key, name, color in comps_to_plot:
         vals = np.array(comp_values[key])
         rects = ax.bar(
             x_pos,
@@ -339,11 +410,12 @@ def plot_variance_vertical(
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    # Legend at the top
+    # Legend at the top dynamically scaled to number of components
+    ncol = len(comps_to_plot)
     ax.legend(
         loc="lower center",
         bbox_to_anchor=(0.5, 1.02),
-        ncol=6,
+        ncol=ncol,
         frameon=False,
         fontsize=9.5,
         columnspacing=1.2,
@@ -379,7 +451,35 @@ def resolve_file_path(path_str: str) -> Path:
     candidate_script = (Path(__file__).resolve().parent / path_str).resolve()
     if candidate_script.exists():
         return candidate_script
+
+    # Fallback mappings for pooled variance files
+    if path_str.endswith("anova_variance_results_pooled.tsv"):
+        alt = candidate.with_name("anova_variance_results_pooled_timbre_source.tsv")
+        if alt.exists():
+            return alt
+
     return p.resolve()
+
+
+def resolve_output_path(path_str: str) -> Path:
+    """Resolve output file path properly relative to cwd, repo root, or script location."""
+    p = Path(path_str).expanduser()
+    if p.is_absolute():
+        return p
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    # If path_str was written relative to script dir (../../out/...) but run from repo root
+    if str(path_str).startswith("../../"):
+        rel_stripped = str(path_str)[6:]
+        candidate_repo = (repo_root / rel_stripped).resolve()
+        if candidate_repo.parent.exists():
+            return candidate_repo
+    candidate_cwd = p.resolve()
+    if candidate_cwd.parent.exists():
+        return candidate_cwd
+    candidate_script = (Path(__file__).resolve().parent / path_str).resolve()
+    if candidate_script.parent.exists():
+        return candidate_script
+    return (repo_root / path_str).resolve()
 
 
 def main():
@@ -389,21 +489,34 @@ def main():
     parser.add_argument(
         "input",
         nargs="?",
-        default="data/anova_variance_results.tsv",
-        help="Path to anova_variance_results.tsv (default: data/anova_variance_results.tsv)",
+        # default="data/anova_variance_results.tsv",
+        default="data/anova_variance_results_pooled_timbre_source.tsv",
+        # default="data/anova_variance_results_pooled_source.tsv",
+        help="Path to anova_variance_results.tsv, anova_variance_results_pooled_timbre_source.tsv, or anova_variance_results_pooled_source.tsv (default: data/anova_variance_results.tsv)",
     )
     parser.add_argument(
         "-o",
         "--output",
-        default="../../out/figure_variance.png",
-        help="Path to save figure image (default: figures/figure_variance.png). Supports .png, .pdf, .svg, etc.",
+        default=None,
+        help="Path to save figure image. If omitted, defaults to out/figure_variance.png or derives name from input TSV. Supports .png, .pdf, .svg, etc.",
+    )
+    parser.add_argument(
+        "--distance-label",
+        default="Distance",
+        help="Display label for the rating_stimulus / distance variance component (default: Distance; e.g. 'Amount').",
+    )
+    parser.add_argument(
+        "--amount",
+        action="store_const",
+        dest="distance_label",
+        const="Amount",
+        help="Shortcut to set distance variance component label to 'Amount'.",
     )
     parser.add_argument(
         "--orientation",
         "--dir",
         choices=["horizontal", "vertical", "h", "v"],
         default="horizontal",
-        # default="vertical",
         help="Orientation of the bars: 'horizontal' (default) or 'vertical'.",
     )
     parser.add_argument(
@@ -422,14 +535,14 @@ def main():
         type=float,
         default=0.10,
         dest="bar_spacing",
-        help="Whitespace gap between adjacent loss function bars (default: 0.35).",
+        help="Whitespace gap between adjacent loss function bars (default: 0.10).",
     )
     parser.add_argument(
         "--group-spacing",
         type=float,
         default=0.0,
         dest="group_spacing",
-        help="Additional whitespace gap between loss function groups (default: 0.35).",
+        help="Additional whitespace gap between loss function groups (default: 0.0).",
     )
     parser.add_argument(
         "--bar-size",
@@ -474,7 +587,10 @@ def main():
         sys.stderr.write(f"Error: ANOVA variance results file not found at: {input_path}\n")
         sys.exit(1)
 
-    labels, comp_values, groups = load_variance_data(input_path)
+    labels, comp_values, groups, active_components = load_variance_data(
+        input_path,
+        distance_label=args.distance_label,
+    )
 
     # Determine orientation
     orientation = args.orientation.lower()
@@ -483,7 +599,20 @@ def main():
     elif args.horizontal:
         orientation = "horizontal"
 
-    out_path = Path(args.output).expanduser().resolve() if args.output else None
+    # Resolve output path
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    if args.output:
+        out_path = resolve_output_path(args.output)
+    else:
+        stem = input_path.stem
+        if stem == "anova_variance_results":
+            out_path = (repo_root / "out" / "figure_variance.png").resolve()
+        elif stem.startswith("anova_variance_results_"):
+            suffix = stem[len("anova_variance_results_"):]
+            out_path = (repo_root / "out" / f"figure_variance_{suffix}.png").resolve()
+        else:
+            out_path = (repo_root / "out" / f"figure_{stem}.png").resolve()
+
     should_show = not args.no_show
 
     if orientation in ["horizontal", "h"]:
@@ -491,6 +620,7 @@ def main():
             labels=labels,
             comp_values=comp_values,
             groups=groups,
+            components=active_components,
             output_path=out_path,
             bar_size=args.bar_size,
             bar_spacing=args.bar_spacing,
@@ -506,6 +636,7 @@ def main():
             labels=labels,
             comp_values=comp_values,
             groups=groups,
+            components=active_components,
             output_path=out_path,
             bar_size=args.bar_size,
             bar_spacing=args.bar_spacing,

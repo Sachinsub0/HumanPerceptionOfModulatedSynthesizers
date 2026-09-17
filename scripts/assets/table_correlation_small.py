@@ -24,7 +24,7 @@ CONDITION_MAP = {
 
 METHOD_GROUPS = [
     [
-        ("mss_log_lin", "MSS Log + Lin."),
+        ("mss_log_lin", "MSS Log + Linear"),
         ("mss_rev", "MSS Revisited"),
         ("mfcc", "MFCC"),
     ],
@@ -34,10 +34,22 @@ METHOD_GROUPS = [
     ],
     [
         ("vggish", "VGGish"),
-        ("encodec48k", "EnCodec 48~kHz"),
+        ("encodec48k", "EnCodec 48kHz"),
         ("clap2", "MS-CLAP"),
         ("panns_wavegram_logmel", "PANNs WGLM"),
     ],
+]
+
+METHOD_GROUP_NAMES = [
+    "STFT--based",
+    "Wavelet--based",
+    "Neural--based",
+]
+
+METHOD_GROUP_TAGS = [
+    r"$^{\;\mathcal{S}}$",
+    r"$^{\;\mathcal{W}}$",
+    r"$^{\;\mathcal{N}}$",
 ]
 
 LOSS_FN_ALIASES = {
@@ -137,6 +149,7 @@ def generate_latex_table(
     df: pd.DataFrame,
     nc_df: pd.DataFrame,
     sig_digits: int = 3,
+    group_means: bool = False,
 ) -> str:
     """Generate the compact LaTeX table string from correlation and noise ceiling dataframes."""
     df = df.copy()
@@ -259,10 +272,12 @@ def generate_latex_table(
 
     # Render each model across the 3 conditions
     for g_idx, group in enumerate(METHOD_GROUPS):
+        tag = METHOD_GROUP_TAGS[g_idx]
         if g_idx > 0:
             lines.append(r"    \addlinespace[5pt]")
         for canon_key, display_name in group:
-            lines.append(f"    {display_name:<15s}")
+            full_display_name = f"{display_name}{tag}"
+            lines.append(f"    {full_display_name:<32s}")
             for cond_idx, cond in enumerate(CONDITIONS):
                 c_df = cond_dfs[cond]
                 match = c_df[c_df["canonical_loss"] == canon_key]
@@ -287,6 +302,55 @@ def generate_latex_table(
                 line_term = "\\\\" if cond_idx == len(CONDITIONS) - 1 else ""
                 lines.append(
                     f"        & {sp_val} & {sp_ast_pad}& {pe_val} & {pe_ast_pad}{line_term}"
+                )
+
+    # Optional 3 extra rows with group means
+    if group_means:
+        lines.append(r"    \midrule")
+        # Compute highlights among the 3 method group means for each condition independently
+        group_means_hl = {}
+        for cond in CONDITIONS:
+            c_df = cond_dfs[cond]
+            sp_entries = []
+            pe_entries = []
+            for g_idx, group in enumerate(METHOD_GROUPS):
+                g_name = METHOD_GROUP_NAMES[g_idx]
+                sp_vals = []
+                pe_vals = []
+                for canon_key, _ in group:
+                    match = c_df[c_df["canonical_loss"] == canon_key]
+                    if match.empty:
+                        match = c_df[c_df["loss_fn"] == canon_key]
+                    if not match.empty:
+                        sp_vals.append(float(match.iloc[0]["spearman_group"]))
+                        pe_vals.append(float(match.iloc[0]["pearson_group"]))
+
+                sp_mean = sum(sp_vals) / len(sp_vals) if sp_vals else float("nan")
+                pe_mean = sum(pe_vals) / len(pe_vals) if pe_vals else float("nan")
+
+                sp_entries.append(
+                    (g_name, sp_mean, format_sig_figs(sp_mean, sig_digits))
+                )
+                pe_entries.append(
+                    (g_name, pe_mean, format_sig_figs(pe_mean, sig_digits))
+                )
+
+            group_means_hl[cond] = {
+                "sp": assign_highlights(sp_entries),
+                "pe": assign_highlights(pe_entries),
+            }
+
+        for g_idx, group_name in enumerate(METHOD_GROUP_NAMES):
+            tag = METHOD_GROUP_TAGS[g_idx]
+            full_group_name = f"{group_name}{tag}"
+            lines.append(f"    {full_group_name:<32s}")
+            for cond_idx, cond in enumerate(CONDITIONS):
+                sp_str = group_means_hl[cond]["sp"].get(group_name, "")
+                pe_str = group_means_hl[cond]["pe"].get(group_name, "")
+
+                line_term = "\\\\" if cond_idx == len(CONDITIONS) - 1 else ""
+                lines.append(
+                    f"        & \\multicolumn{{2}}{{l}}{{{sp_str}}} & \\multicolumn{{2}}{{l}}{{{pe_str}}} {line_term}"
                 )
 
     lines.append(r"    \bottomrule")
@@ -336,6 +400,14 @@ def main():
         help="Number of significant digits for correlation coefficients and CIs (default: 3).",
     )
     parser.add_argument(
+        "--group-means",
+        "--means",
+        action="store_true",
+        default=True,
+        dest="group_means",
+        help="Display 3 extra rows with the mean for each method group (STFT-based, Wavelet-based, and Neural-based) at the bottom of the table after a midbar.",
+    )
+    parser.add_argument(
         "-o",
         "--output",
         default=None,
@@ -371,6 +443,7 @@ def main():
         df=df,
         nc_df=nc_df,
         sig_digits=args.sig_digits,
+        group_means=args.group_means,
     )
 
     if not args.quiet:

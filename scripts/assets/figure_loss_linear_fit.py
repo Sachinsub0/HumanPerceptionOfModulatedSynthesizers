@@ -7,21 +7,29 @@ with column titles displayed at the top. Reference points are marked with square
 subsequent points with circles.
 
 Plotting options (--plot):
-- 'losses' (default): 9 rows of individual loss functions.
+- 'losses' (default): individual loss functions (or with Human Listeners as row 0 if --human-data is given).
 - 'groups': 3 rows of aggregated representation groups (STFT, Wavelet, Neural).
-- 'all': 12 rows combining all 9 individual loss functions and the 3 aggregated groups.
+- 'all': combines all individual loss functions and the 3 aggregated groups.
+
+Human benchmark option (--human-data / --human):
+- When provided (e.g. data/listening_test_responses_postprocessed.tsv), participant ratings
+  are preserved across all participants to compute empirical range, std, and CI before averaging,
+  graphed as the first row ('Human Listeners') with y-axis ticks [0, 25, 50, 75, 100].
+  The vertical gap between the human row and subsequent rows is configurable via --gap-human.
 
 Normalization options (--normalize):
-- '1' or 'max100' (default): Peak/max normalization to [0, 100] globally per loss function.
+- '1' or 'max100': Peak/max normalization to [0, 100] globally per loss function.
+- 'mean_max' or 'cond_max': Normalization by the maximum condition mean to [0, 100] (resists single-trial outliers).
+- 'p95' or 'percentile95': Normalization by the 95th percentile to [0, 100].
 - '2' or 'std': Zero-anchored standard deviation scaling (d / sigma).
-- 'none': Raw unnormalized distances.
+- 'none' (default): Raw unnormalized distances.
 
 Fit & Error Bar options:
 - Linear line of best fit & R^2: toggleable via --no-fit / --hide-fit (default: shown).
 - Connecting dots: --connect-dots / --connect-points (straight black line segments).
 - Error bars (mutually exclusive metric):
-  - 95% Confidence Intervals: --ci or --error-bars ci (default)
-  - Standard Deviation: --std or --error-bars std
+  - 95% Confidence Intervals: --ci or --error-bars ci
+  - Standard Deviation: --std or --error-bars std (default)
   - No error bars: --no-ci, --no-error-bars, or --error-bars none
 - Error representation style:
   - --shade or --error-style shade: plot CI or STD as a semi-transparent shaded region.
@@ -47,7 +55,7 @@ from scipy.stats import linregress
 # Canonical individual loss functions
 INDIVIDUAL_LOSS_FUNCTIONS = [
     # STFT Group
-    ("mss_log_lin", "MSS Log + Lin.", "STFT"),
+    ("mss_log_lin", "MSS Log + Linear", "STFT"),
     ("mss_rev", "MSS Revisited", "STFT"),
     ("mfcc", "MFCC", "STFT"),
     # Wavelet Group
@@ -55,23 +63,15 @@ INDIVIDUAL_LOSS_FUNCTIONS = [
     ("jtfs_log1p", "JTFS", "Wavelet"),
     # Neural Group
     ("vggish", "VGGish", "Neural"),
-    ("encodec48k", "EnCodec 48~kHz", "Neural"),
+    ("encodec48k", "EnCodec 48 kHz", "Neural"),
     ("clap2", "MS-CLAP", "Neural"),
     ("panns_wavegram_logmel", "PANNs WGLM", "Neural"),
 ]
 
 # Aggregated representation groups and constituent loss functions
 AGGREGATED_GROUPS = [
-    {
-        "key": "group_stft",
-        "label": "STFT Group",
-        "models": ["mss_log_lin", "mss_rev", "mfcc"],
-    },
-    {
-        "key": "group_wavelet",
-        "label": "Wavelet Group",
-        "models": ["scat1d_log1p", "jtfs_log1p"],
-    },
+    {"key": "group_stft", "label": "STFT Group", "models": ["mss_log_lin", "mss_rev", "mfcc"]},
+    {"key": "group_wavelet", "label": "Wavelet Group", "models": ["scat1d_log1p", "jtfs_log1p"]},
     {
         "key": "group_neural",
         "label": "Neural Group",
@@ -89,7 +89,7 @@ MODULATION_COLUMNS = [
     {
         "key": "freq",
         "title": "Frequency (Hz)",
-        "tick_labels": ["0.25", "0.50", "1.00", "2.00", "4.00"],
+        "tick_labels": ["0.25", "0.5", "1", "2", "4"],
     },
     {
         "key": "reg",
@@ -105,11 +105,62 @@ def load_distances_data(data_path: Path) -> pd.DataFrame:
     return pd.read_csv(data_path, sep=sep)
 
 
+def load_human_data(data_path: Path) -> pd.DataFrame:
+    """Load postprocessed human listening study responses as a benchmark.
+
+    Retains all participant responses so empirical range, standard deviation,
+    and confidence intervals are computed from the full participant distribution
+    before being averaged into condition means.
+    """
+    sep = "\t" if data_path.suffix in [".tsv", ".txt"] else ","
+    df_human = pd.read_csv(data_path, sep=sep)
+
+    split_cols = df_human["trial_id"].str.split("_", expand=True)
+    df_human["mod_type"] = split_cols[0]
+    df_human["feature"] = split_cols[1]
+    df_human["source"] = split_cols[2]
+    df_human["distance"] = df_human["rating_score"].astype(float)
+    df_human["loss_fn"] = "human"
+
+    amount_map = {
+        "amp": {
+            "reference": 0.1,
+            "condition_a": 0.3,
+            "condition_b": 0.5,
+            "condition_c": 0.7,
+            "condition_d": 0.9,
+        },
+        "freq": {
+            "reference": 0.25,
+            "condition_a": 0.5,
+            "condition_b": 1.0,
+            "condition_c": 2.0,
+            "condition_d": 4.0,
+        },
+        "reg": {
+            "reference": 0.0,
+            "condition_a": 0.125,
+            "condition_b": 0.25,
+            "condition_c": 0.375,
+            "condition_d": 0.5,
+        },
+    }
+
+    df_human["amount"] = [
+        amount_map[m][s] for m, s in zip(df_human["mod_type"], df_human["rating_stimulus"])
+    ]
+    df_human["is_reference"] = df_human["rating_stimulus"] == "reference"
+
+    return df_human
+
+
 def normalize_distances(df: pd.DataFrame, method: str) -> pd.DataFrame:
     """Normalize distance values per loss function.
 
     Methods:
     - '1' or 'max100': Divide each loss function by its global max and scale to [0, 100].
+    - 'mean_max' or 'cond_max': Divide each loss function by the maximum condition mean and scale to [0, 100] (resists single-trial outliers).
+    - 'p95' or 'percentile95': Divide by the 95th percentile and scale to [0, 100].
     - '2' or 'std': Divide each loss function by its standard deviation around zero.
     - 'none': Keep raw distances unchanged.
     """
@@ -119,18 +170,35 @@ def normalize_distances(df: pd.DataFrame, method: str) -> pd.DataFrame:
 
     df_out = df.copy()
     for loss_key in df_out["loss_fn"].unique():
+        if loss_key == "human":
+            # Human listening study ratings are natively on [0, 100] scale
+            continue
+
         mask = df_out["loss_fn"] == loss_key
-        vals = df_out.loc[mask, "distance"].values
+        sub = df_out[mask]
+        vals = sub["distance"].values
+
         if method in ("1", "max100", "max", "peak"):
             max_val = np.nanmax(vals)
             if max_val > 0:
                 df_out.loc[mask, "distance"] = (vals / max_val) * 100.0
+        elif method in ("mean_max", "cond_max"):
+            cond_means = sub.groupby(["mod_type", "amount"])["distance"].mean()
+            scale = cond_means.max()
+            if scale > 0:
+                df_out.loc[mask, "distance"] = (vals / scale) * 100.0
+        elif method in ("p95", "percentile95"):
+            scale = np.nanpercentile(vals, 95)
+            if scale > 0:
+                df_out.loc[mask, "distance"] = (vals / scale) * 100.0
         elif method in ("2", "std", "z-std", "sigma"):
             std_val = np.nanstd(vals)
             if std_val > 0:
                 df_out.loc[mask, "distance"] = vals / std_val
         else:
-            raise ValueError(f"Unknown normalization method: {method}. Choose '1' (max100), '2' (std), or 'none'.")
+            raise ValueError(
+                f"Unknown normalization method: {method}. Choose '1' (max100), 'mean_max', 'p95', '2' (std), or 'none'."
+            )
 
     return df_out
 
@@ -165,6 +233,34 @@ def compute_point_stats(
         raise ValueError(f"Unknown error_mode: {error_mode}. Choose 'ci', 'std', or 'none'.")
 
 
+def compute_nice_5_ticks(v_max: float) -> tuple[list[float | int], float, float]:
+    """Compute 5 clean, evenly spaced tickmarks [0, step, 2*step, 3*step, 4*step] for a given max value.
+
+    Returns (ticks, y_lower, y_upper).
+    """
+    if v_max <= 0:
+        return [0, 1, 2, 3, 4], -0.16, 4.16
+
+    raw_step = v_max / 4.0
+    exponent = np.floor(np.log10(raw_step))
+    fraction = raw_step / (10 ** exponent)
+
+    # Standard 1-2-5 and intermediate round step multipliers
+    nice_steps = [1.0, 1.2, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
+    step_mult = min(s for s in nice_steps if s >= fraction - 1e-9)
+    step = step_mult * (10 ** exponent)
+
+    ticks = [round(i * step, 10) for i in range(5)]
+    y_upper = ticks[-1] * 1.04
+    y_lower = -0.04 * ticks[-1]
+
+    # Convert to int if all values are exact integers
+    if all(abs(t - round(t)) < 1e-8 for t in ticks):
+        ticks = [int(round(t)) for t in ticks]
+
+    return ticks, y_lower, y_upper
+
+
 def prepare_plot_items(
     plot_mode: str,
     df_norm: pd.DataFrame,
@@ -172,13 +268,23 @@ def prepare_plot_items(
     """Prepare row data specifications according to the chosen plot mode."""
     items: list[dict] = []
 
+    # If human benchmark data is present, graph it as the first row
+    if "human" in df_norm["loss_fn"].unique():
+        items.append({
+            "type": "human",
+            "label": "Human Listeners",
+            "sub_df": df_norm[df_norm["loss_fn"] == "human"],
+        })
+
     if plot_mode in ("losses", "all"):
         for key, label, _ in INDIVIDUAL_LOSS_FUNCTIONS:
-            items.append({
-                "type": "individual",
-                "label": label,
-                "sub_df": df_norm[df_norm["loss_fn"] == key],
-            })
+            sub = df_norm[df_norm["loss_fn"] == key]
+            if not sub.empty:
+                items.append({
+                    "type": "individual",
+                    "label": label,
+                    "sub_df": sub,
+                })
 
     if plot_mode in ("groups", "all"):
         for grp in AGGREGATED_GROUPS:
@@ -194,7 +300,7 @@ def prepare_plot_items(
 def plot_loss_linear_fits(
     df: pd.DataFrame,
     plot_mode: str = "losses",
-    normalize: str = "1",
+    normalize: str = "none",
     show_fit: bool = True,
     connect_dots: bool = False,
     error_mode: str = "ci",
@@ -207,6 +313,7 @@ def plot_loss_linear_fits(
     plot_size: float = 2.0,
     gap_x: float = 0.08,
     gap_y: float = 0.08,
+    gap_human: float = 0.16,
     line_color: str = "#2a78d6",
     marker_color: str = "#111111",
     r2_decimals: int = 2,
@@ -230,21 +337,38 @@ def plot_loss_linear_fits(
 
     n_rows = len(row_items)
     n_cols = len(MODULATION_COLUMNS)
+    has_human = any(item.get("type") == "human" for item in row_items)
+    has_custom_human_gap = has_human and n_rows > 1
 
     margin_left = 0.85
     margin_right = 0.06
     margin_bottom = 0.44
     margin_top = 0.32
 
+    # Calculate figure dimensions, taking configurable gap_human into account
     fig_w = margin_left + n_cols * plot_size + (n_cols - 1) * gap_x + margin_right
-    fig_h = margin_bottom + n_rows * plot_size + (n_rows - 1) * gap_y + margin_top
+    if has_custom_human_gap:
+        total_gaps_y = (n_rows - 2) * gap_y + gap_human
+    else:
+        total_gaps_y = (n_rows - 1) * gap_y
+    fig_h = margin_bottom + n_rows * plot_size + total_gaps_y + margin_top
 
     fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi)
 
     axes = np.empty((n_rows, n_cols), dtype=object)
     for r in range(n_rows):
-        row_from_bottom = n_rows - 1 - r
-        b_in = margin_bottom + row_from_bottom * (plot_size + gap_y)
+        # r = 0 is the topmost row (Human row if present)
+        # r = n_rows - 1 is the bottommost row
+        if has_custom_human_gap:
+            if r == 0:
+                b_in = margin_bottom + (n_rows - 1) * plot_size + (n_rows - 2) * gap_y + gap_human
+            else:
+                row_from_bottom = n_rows - 1 - r
+                b_in = margin_bottom + row_from_bottom * (plot_size + gap_y)
+        else:
+            row_from_bottom = n_rows - 1 - r
+            b_in = margin_bottom + row_from_bottom * (plot_size + gap_y)
+
         for c in range(n_cols):
             l_in = margin_left + c * (plot_size + gap_x)
             ax = fig.add_axes([
@@ -260,11 +384,12 @@ def plot_loss_linear_fits(
     for r_idx, item in enumerate(row_items):
         sub_df = item["sub_df"]
         row_label = item["label"]
+        is_human = item.get("type") == "human"
 
-        # Calculate shared y-upper limit for this row across all 3 conditions
-        if norm_clean in ("1", "max100", "max", "peak"):
+        # Calculate y-limits and ticks (5 tickmarks for human data and all loss functions)
+        if is_human or norm_clean in ("1", "max100", "max", "peak", "mean_max", "cond_max", "p95"):
             y_upper = 104.0
-            y_lower = -2.0
+            y_lower = -4.0
             y_ticks = [0, 25, 50, 75, 100]
         else:
             row_max = 0.0
@@ -280,9 +405,7 @@ def plot_loss_linear_fits(
                     if val > row_max:
                         row_max = val
 
-            y_upper = row_max * 1.15 if row_max > 0 else 1.0
-            y_lower = -0.02 * y_upper
-            y_ticks = None
+            y_ticks, y_lower, y_upper = compute_nice_5_ticks(row_max)
 
         for c_idx, col in enumerate(MODULATION_COLUMNS):
             ax = axes[r_idx, c_idx]
@@ -422,19 +545,16 @@ def plot_loss_linear_fits(
             ax.set_xlim(-0.5, 4.5)
             ax.set_ylim(y_lower, y_upper)
 
-            # Y-axis ticks
-            if y_ticks is not None:
-                ax.set_yticks(y_ticks)
-            else:
-                ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=4, prune=None))
+            # Y-axis ticks: exactly 5 tickmarks for human data and all loss functions
+            ax.set_yticks(y_ticks)
 
             # Column titles: only on the very top row (r_idx == 0)
             if r_idx == 0:
                 ax.set_title(col["title"], fontsize=11.5, fontweight="bold", pad=6)
 
-            # X-ticks: only on the very bottom row (r_idx == n_rows - 1)
+            # X-ticks: set explicitly on ALL rows so vertical gridlines are drawn at every point
+            ax.set_xticks(x_indices)
             if r_idx == n_rows - 1:
-                ax.set_xticks(x_indices)
                 ax.set_xticklabels(col["tick_labels"], fontsize=9)
             else:
                 ax.tick_params(labelbottom=False, bottom=False)
@@ -446,9 +566,26 @@ def plot_loss_linear_fits(
             else:
                 ax.tick_params(labelleft=False, left=False)
 
-            # Dotted gridlines
-            ax.grid(True, linestyle=":", color="#999999", alpha=0.7, linewidth=0.7)
+            # Dotted gridlines across all subplots
+            ax.grid(True, which="major", linestyle=":", color="#999999", alpha=0.7, linewidth=0.7)
             ax.set_axisbelow(True)
+
+    # Subtle dashed separator line centered between Human Listeners benchmark and subsequent rows
+    if has_custom_human_gap:
+        row0_bottom = margin_bottom + (n_rows - 1) * plot_size + (n_rows - 2) * gap_y + gap_human
+        row1_top = margin_bottom + (n_rows - 2) * (plot_size + gap_y) + plot_size
+        sep_human_in = (row0_bottom + row1_top) / 2.0
+        sep_human_norm = sep_human_in / fig_h
+        fig.add_artist(
+            plt.Line2D(
+                [margin_left / fig_w, 1.0 - (margin_right / fig_w)],
+                [sep_human_norm, sep_human_norm],
+                color="#888888",
+                linestyle="--",
+                linewidth=1.2,
+                alpha=0.8,
+            )
+        )
 
     # In 'all' mode: draw subtle dashed line separating individual models from aggregated groups
     if plot_mode == "all":
@@ -494,6 +631,26 @@ def resolve_file_path(path_str: str) -> Path:
     return p.resolve()
 
 
+def resolve_output_path(path_str: str) -> Path:
+    """Resolve output file path properly relative to cwd, repo root, or script location."""
+    p = Path(path_str).expanduser()
+    if p.is_absolute():
+        return p
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    if str(path_str).startswith("../../"):
+        rel_stripped = str(path_str)[6:]
+        candidate_repo = (repo_root / rel_stripped).resolve()
+        if candidate_repo.parent.exists():
+            return candidate_repo
+    candidate_cwd = p.resolve()
+    if candidate_cwd.parent.exists():
+        return candidate_cwd
+    candidate_script = (Path(__file__).resolve().parent / path_str).resolve()
+    if candidate_script.parent.exists():
+        return candidate_script
+    return (repo_root / path_str).resolve()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate figure of loss function linear fits across modulations (losses, groups, or all)."
@@ -505,6 +662,15 @@ def main():
         help="Path to distances TSV/CSV dataset (default: data/distances.tsv)",
     )
     parser.add_argument(
+        "--human-data",
+        "--human",
+        nargs="?",
+        const="data/listening_test_responses_postprocessed.tsv",
+        default="data/listening_test_responses_postprocessed.tsv",
+        dest="human_data",
+        help="Optional path to postprocessed human listening responses TSV (default when flag used without argument: data/listening_test_responses_postprocessed.tsv). When provided, human ratings are graphed as the first row.",
+    )
+    parser.add_argument(
         "-o",
         "--output",
         default="../../out/figure_loss_linear_fit.png",
@@ -514,14 +680,13 @@ def main():
         "--plot",
         choices=["losses", "groups", "all"],
         default="losses",
-        # default="groups",
-        help="Plotting mode: 'losses' (9 individual rows), 'groups' (3 aggregated rows: STFT, Wavelet, Neural), or 'all' (12 rows). Default: losses.",
+        help="Plotting mode: 'losses' (individual loss function rows), 'groups' (3 aggregated rows: STFT, Wavelet, Neural), or 'all'. Default: losses.",
     )
     parser.add_argument(
         "--normalize",
-        choices=["1", "max100", "2", "std", "none"],
-        default="1",
-        help="Distance normalization method: '1' or 'max100' (default: Peak scale to [0, 100]), '2' or 'std' (scale by standard deviation), or 'none'.",
+        choices=["1", "max100", "mean_max", "cond_max", "p95", "2", "std", "none"],
+        default="none",
+        help="Distance normalization method: '1' or 'max100' (Peak scale to [0, 100]), 'mean_max' (scale by maximum condition mean), 'p95' (scale by 95th percentile), '2' or 'std' (scale by standard deviation), or 'none'.",
     )
     parser.add_argument(
         "--no-fit",
@@ -529,7 +694,6 @@ def main():
         action="store_false",
         dest="show_fit",
         default=True,
-        # default=False,
         help="Do not display linear line of best fit and R^2 value annotation.",
     )
     parser.add_argument(
@@ -538,7 +702,6 @@ def main():
         action="store_true",
         dest="connect_dots",
         default=False,
-        # default=True,
         help="Connect data points with straight black line segments.",
     )
 
@@ -549,56 +712,24 @@ def main():
         choices=["ci", "std", "none"],
         dest="error_bars",
         default="std",
-        help="Error bar metric: 'ci' (95%% confidence intervals, default), 'std' (sample standard deviation), or 'none' (no error bars).",
+        help="Error bar metric: 'ci' (95%% confidence intervals), 'std' (sample standard deviation, default), or 'none' (no error bars).",
     )
-    # err_group.add_argument(
-    #     "--ci",
-    #     action="store_const",
-    #     dest="error_bars",
-    #     const="ci",
-    #     help="Display 95%% Student's t confidence intervals as error metric (default).",
-    # )
-    # err_group.add_argument(
-    #     "--std",
-    #     action="store_const",
-    #     dest="error_bars",
-    #     const="std",
-    #     help="Display standard deviation as error metric (instead of confidence intervals).",
-    # )
-    # err_group.add_argument(
-    #     "--no-ci",
-    #     "--no-error-bars",
-    #     action="store_const",
-    #     dest="error_bars",
-    #     const="none",
-    #     help="Do not display any error bars or shaded error region.",
-    # )
 
     # Shaded region / error style options
     parser.add_argument(
         "--error-style",
         choices=["bars", "shade", "both"],
         default="bars",
-        # default="shade",
         dest="error_style",
         help="Error visual style: 'bars' (default: vertical error bars with caps), 'shade' (shaded ribbon), or 'both'.",
     )
-    # parser.add_argument(
-    #     "--shade",
-    #     "--shaded",
-    #     action="store_const",
-    #     const="shade",
-    #     dest="error_style",
-    #     help="Plot the CI or STD as a semi-transparent shaded region instead of vertical error bars.",
-    # )
     parser.add_argument(
         "--shade-range",
         "--range-shade",
         "--min-max",
         action="store_true",
         dest="shade_range",
-        default=False,
-        # default=True,
+        default=True,
         help="Shade the full [min, max] observed range with a lighter color than the CI/STD shading.",
     )
     parser.add_argument(
@@ -633,7 +764,15 @@ def main():
         type=float,
         default=0.08,
         dest="gap_y",
-        help="Vertical gap between rows in inches (default: 0.08).",
+        help="Vertical gap between model rows in inches (default: 0.08).",
+    )
+    parser.add_argument(
+        "--gap-human",
+        "--human-gap",
+        type=float,
+        default=0.32,
+        dest="gap_human",
+        help="Vertical gap between the human benchmark row and subsequent model rows in inches (default: 0.16).",
     )
     parser.add_argument(
         "--ci-level",
@@ -677,7 +816,16 @@ def main():
 
     df_dist = load_distances_data(input_path)
 
-    out_path = Path(args.output).expanduser().resolve() if args.output else None
+    # Load human listening study data if provided
+    if args.human_data:
+        human_path = resolve_file_path(args.human_data)
+        if not human_path.exists():
+            sys.stderr.write(f"Warning: Human data file not found at: {human_path}. Proceeding without human data.\n")
+        else:
+            df_human = load_human_data(human_path)
+            df_dist = pd.concat([df_human, df_dist], ignore_index=True)
+
+    out_path = resolve_output_path(args.output) if args.output else None
 
     plot_loss_linear_fits(
         df=df_dist,
@@ -695,6 +843,7 @@ def main():
         plot_size=args.plot_size,
         gap_x=args.gap_x,
         gap_y=args.gap_y,
+        gap_human=args.gap_human,
         line_color=args.line_color,
         marker_color=args.marker_color,
         r2_decimals=args.r2_decimals,
