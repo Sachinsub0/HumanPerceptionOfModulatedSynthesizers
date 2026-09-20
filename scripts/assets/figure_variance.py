@@ -12,6 +12,24 @@ the confounded 2-way interaction and is labeled '2-Way Inter.' with the matching
 
 Supports both horizontal and vertical orientations, with configurable white space between
 individual loss functions, method groups, human data, bottom bar and x-axis, and between the legend and graph.
+
+Typography & Font Size options:
+- --fontsize-labels: font size for entity/method labels (default: 9.0).
+- --fontsize-percentages: font size for percentage text inside bar segments (default: 9.0).
+- --fontsize-axis-label: optional override for 'Explained Variance (%)' axis label (default: same as labels).
+- --fontsize-ticks: optional override for numeric tick values font size (default: same as labels).
+- --fontsize-legend: optional override for legend font size (default: 9.0).
+
+Legend & Layout options:
+- --legend-rows: number of lines/rows to split the legend across (default: 2).
+- --legend-cols: number of columns for the legend (overrides --legend-rows).
+- --legend-loc: anchor location for the legend (default: 'lower right').
+- --legend-x: horizontal position/offset for legend (default: 1.0, right-aligned up to 100% tick marker).
+- --legend-columnspacing: spacing between columns in the legend (default: 1.2).
+- --component-spacing: width of vertical white space bar between different components of the same row (default: 0.8).
+- --no-group-lines: do not draw dashed lines between groups (human, stft, wavelet, neural).
+- --tilt-x / --tilt-x-labels: tilt the x-axis labels at 45 degrees.
+- --tilt-y / --tilt-y-labels: tilt the y-axis labels at 45 degrees.
 """
 
 from __future__ import annotations
@@ -52,12 +70,12 @@ LOSS_FN_ALIASES = {
 
 # The canonical variance components, display labels, and distinct harmonious colors
 COMPONENTS = [
-    ("distance", "Distance", "#2b5c8f"),        # Deep Steel Blue
-    ("mod", "Modulation Type", "#3399a1"),         # Cyan / Teal
-    ("feat", "Timbre Quality", "#f39c12"),          # Amber / Orange
-    ("source", "Source", "#d9534f"),         # Coral / Crimson
-    ("two_way", "2-Way Interactions", "#8e44ad"),  # Amethyst Purple
-    ("higher_order", "Higher Order", "#7f8c8d"),  # Slate Gray
+    ("distance", "Modulation Amount", "#082a54"),
+    ("mod", "Modulation Type", "#d9534f"),
+    ("feat", "Timbre Quality", "#3399a1"),
+    ("source", "Wavetable Source", "#f39c12"),
+    ("two_way", "2-Way Interactions", "#a559aa"),
+    ("higher_order", "Higher Order", "#bbbbbb"),
 ]
 
 
@@ -85,24 +103,24 @@ def load_variance_data(
     # Determine potential active components dynamically based on input sources
     candidate_components: list[tuple[str, str, str]] = []
     if "rating_stimulus" in present_sources:
-        candidate_components.append(("distance", distance_label, "#2b5c8f"))
+        candidate_components.append(("distance", distance_label, "#082a54"))
     if "modulation" in present_sources:
-        candidate_components.append(("mod", "Modulation Type", "#3399a1"))
+        candidate_components.append(("mod", "Modulation Type", "#d9534f"))
     if "feature" in present_sources:
-        candidate_components.append(("feat", "Timbre Quality", "#f39c12"))
+        candidate_components.append(("feat", "Timbre Quality", "#3399a1"))
     if "source" in present_sources:
-        candidate_components.append(("source", "Source", "#d9534f"))
+        candidate_components.append(("source", "Wavetable Source", "#f39c12"))
 
     # If explicit 2-way terms exist OR if residual in 2-factor design represents the 2-way interaction
     residual_is_two_way = has_residual and not has_two_way and not has_three_way
     if has_two_way or residual_is_two_way:
-        candidate_components.append(("two_way", "2-Way Interactions", "#8e44ad"))
+        candidate_components.append(("two_way", "2-Way Interactions", "#a559aa"))
 
     if has_three_way:
         candidate_components.append(("three_way", "3-Way Interactions", "#9b59b6"))
 
     if has_residual and not residual_is_two_way:
-        candidate_components.append(("higher_order", "Higher Order", "#7f8c8d"))
+        candidate_components.append(("higher_order", "Higher Order", "#bbbbbb"))
 
     # Fallback to standard 6 components if no recognized sources
     if not candidate_components:
@@ -162,8 +180,8 @@ def compute_positions(
     bar_spacing: float = 0.35,
     group_spacing: float = 0.35,
     human_spacing: Optional[float] = None,
-) -> tuple[np.ndarray, float]:
-    """Compute center coordinates for each bar and the human separator line position.
+) -> tuple[np.ndarray, float, list[float]]:
+    """Compute center coordinates for each bar and separator positions between groups.
 
     Args:
         groups: Group identifiers for each entity.
@@ -176,12 +194,12 @@ def compute_positions(
     Returns:
         positions: Coordinate array for bar centers.
         separator_pos: Coordinate midway between Human Listeners and the first model.
+        group_separators: List of coordinates midway between all adjacent distinct groups.
     """
     effective_human_spacing = human_spacing if human_spacing is not None else group_spacing
     positions = []
     current_pos = 0.0
     step = bar_size + bar_spacing
-    separator_pos = (step + effective_human_spacing) / 2.0
 
     for i, grp in enumerate(groups):
         if i == 0:
@@ -196,18 +214,58 @@ def compute_positions(
             current_pos += delta
             positions.append(current_pos)
 
-    if len(positions) > 1 and "human" in groups:
-        human_idx = groups.index("human")
-        if human_idx == 0:
-            separator_pos = (positions[0] + positions[1]) / 2.0
-        elif human_idx == len(groups) - 1:
-            separator_pos = (positions[-2] + positions[-1]) / 2.0
-        else:
-            separator_pos = (positions[human_idx] + positions[human_idx + 1]) / 2.0
-    elif len(positions) > 1:
+    # Compute separator positions between all adjacent distinct groups
+    group_separators: list[float] = []
+    separator_pos = 0.0
+    for i in range(len(groups) - 1):
+        if groups[i] != groups[i + 1]:
+            sep = (positions[i] + positions[i + 1]) / 2.0
+            group_separators.append(sep)
+            if groups[i] == "human" or groups[i + 1] == "human":
+                separator_pos = sep
+
+    if separator_pos == 0.0 and len(positions) > 1:
         separator_pos = (positions[0] + positions[1]) / 2.0
 
-    return np.array(positions), separator_pos
+    return np.array(positions), separator_pos, group_separators
+
+
+def reorder_legend_left_to_right(
+    handles: Sequence,
+    labels: Sequence[str],
+    ncols: int,
+) -> tuple[list, list[str]]:
+    """Reorder legend handles and labels so they are read left-to-right, row-by-row.
+
+    By default, matplotlib populates multi-column legends column-by-column (top-to-bottom).
+    This rearranges items so that when matplotlib places them into columns, the resulting
+    visual layout reads row-by-row from left to right.
+    """
+    n = len(handles)
+    if ncols <= 1 or n <= 1:
+        return list(handles), list(labels)
+
+    splits = np.array_split(range(n), ncols)
+    col_lens = [len(s) for s in splits]
+    nrows = max(col_lens)
+    grid = [[None] * ncols for _ in range(nrows)]
+
+    idx = 0
+    for r in range(nrows):
+        for c in range(ncols):
+            if r < col_lens[c]:
+                grid[r][c] = (handles[idx], labels[idx])
+                idx += 1
+
+    reordered_handles = []
+    reordered_labels = []
+    for c in range(ncols):
+        for r in range(col_lens[c]):
+            h, l = grid[r][c]
+            reordered_handles.append(h)
+            reordered_labels.append(l)
+
+    return reordered_handles, reordered_labels
 
 
 def plot_variance_horizontal(
@@ -222,22 +280,43 @@ def plot_variance_horizontal(
     human_spacing: Optional[float] = None,
     bottom_spacing: Optional[float] = None,
     legend_y: Optional[float] = None,
+    legend_x: Optional[float] = None,
+    legend_loc: Optional[str] = None,
+    legend_rows: int = 2,
+    legend_ncol: Optional[int] = None,
+    legend_columnspacing: Optional[float] = None,
+    component_spacing: float = 0.8,
     show_labels: bool = True,
+    show_group_lines: bool = True,
     label_threshold: float = 4.5,
+    fontsize_labels: float = 9.0,
+    fontsize_percentages: float = 9.0,
+    fontsize_axis_label: Optional[float] = None,
+    fontsize_ticks: Optional[float] = None,
+    fontsize_legend: Optional[float] = None,
+    tilt_x: bool = False,
+    x_rotation: Optional[float] = None,
+    tilt_y: bool = False,
+    y_rotation: Optional[float] = None,
     title: Optional[str] = None,
     dpi: int = 300,
     show: bool = True,
 ) -> plt.Figure:
     """Create a horizontal stacked bar chart of the variance decomposition."""
     plt.rcParams.update({
+        "font.family": "sans-serif",
         "font.sans-serif": ["DejaVu Sans", "Helvetica", "Arial"],
+        "font.size": 9.0,
         "axes.edgecolor": "#333333",
         "axes.linewidth": 0.8,
     })
 
     comps_to_plot = components if components is not None else COMPONENTS
+    eff_axis_label = fontsize_axis_label if fontsize_axis_label is not None else fontsize_labels
+    eff_ticks = fontsize_ticks if fontsize_ticks is not None else fontsize_labels
+    eff_legend = fontsize_legend if fontsize_legend is not None else 9.0
 
-    y_pos, separator_pos = compute_positions(
+    y_pos, separator_pos, group_separators = compute_positions(
         groups=groups,
         bar_size=bar_size,
         bar_spacing=bar_spacing,
@@ -248,7 +327,7 @@ def plot_variance_horizontal(
     n_bars = len(labels)
     total_span = y_pos[-1] - y_pos[0]
     fig_height = max(5.5, 6.0 * (total_span / 9.0))
-    fig, ax = plt.subplots(figsize=(10, fig_height), dpi=dpi)
+    fig, ax = plt.subplots(figsize=(7.07, fig_height), dpi=dpi)
 
     cum_left = np.zeros(n_bars)
 
@@ -260,8 +339,8 @@ def plot_variance_horizontal(
             left=cum_left,
             height=bar_size,
             color=color,
-            edgecolor="white",
-            linewidth=0.8,
+            edgecolor="white" if component_spacing > 0 else "none",
+            linewidth=component_spacing,
             label=name,
         )
 
@@ -270,7 +349,7 @@ def plot_variance_horizontal(
                 if val >= label_threshold:
                     x_center = cum_left[i] + val / 2.0
                     y_center = rect.get_y() + rect.get_height() / 2.0
-                    val_str = f"{val:.1f}%" if val < 10 else f"{val:.0f}%"
+                    val_str = f"{val:.0f}%" if val < 10 else f"{val:.0f}%"
                     ax.text(
                         x_center,
                         y_center,
@@ -278,7 +357,7 @@ def plot_variance_horizontal(
                         ha="center",
                         va="center",
                         color="white",
-                        fontsize=8.5,
+                        fontsize=fontsize_percentages,
                         fontweight="bold",
                     )
 
@@ -290,19 +369,29 @@ def plot_variance_horizontal(
         bot_pad = 0.5 + bot_pad
 
     ax.set_yticks(y_pos)
-    ax.set_yticklabels(labels, fontsize=10.5)
+    if tilt_y or y_rotation is not None:
+        y_rot = y_rotation if y_rotation is not None else 45
+        ax.set_yticklabels(labels, rotation=y_rot, ha="right", va="center", fontsize=fontsize_labels, fontweight="bold")
+    else:
+        ax.set_yticklabels(labels, fontsize=fontsize_labels, fontweight="bold")
+    ax.tick_params(axis="y", labelsize=fontsize_labels)
     ax.set_ylim(y_pos[-1] + bar_size * bot_pad, y_pos[0] - bar_size * 0.60)
 
-    # Visual separator line between Human Listeners and model representations
-    if len(labels) > 1 and "human" in groups:
-        ax.axhline(separator_pos, color="#777777", linestyle="--", linewidth=1.0, alpha=0.7)
+    # Visual separator dashed lines between groups (Human, STFT, Wavelet, Neural)
+    if show_group_lines:
+        for sep in group_separators:
+            ax.axhline(sep, color="#777777", linestyle="--", linewidth=1.0, alpha=0.7)
 
     # Format x-axis
     ax.set_xlim(0, 100)
     ax.xaxis.set_major_locator(mticker.MultipleLocator(20))
     ax.xaxis.set_minor_locator(mticker.MultipleLocator(10))
     ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=100, decimals=0))
-    ax.set_xlabel("Explained Variance (%)", fontsize=11, fontweight="bold", labelpad=8)
+    ax.set_xlabel("Explained Variance (%)", fontsize=eff_axis_label, fontweight="bold", labelpad=8)
+    ax.tick_params(axis="x", labelsize=eff_ticks)
+    if tilt_x or x_rotation is not None:
+        rot = x_rotation if x_rotation is not None else 45
+        plt.setp(ax.get_xticklabels(), rotation=rot, ha="right")
     ax.grid(axis="x", linestyle=":", color="#cccccc", alpha=0.7)
     ax.set_axisbelow(True)
 
@@ -310,23 +399,38 @@ def plot_variance_horizontal(
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    # Legend at the top dynamically scaled to number of components
-    ncol = len(comps_to_plot)
+    # Legend at the top split across lines (default: right-aligned up to 100% tick marker)
+    if legend_ncol is not None:
+        ncol = legend_ncol
+    elif legend_rows is not None and legend_rows > 0:
+        ncol = int(np.ceil(len(comps_to_plot) / legend_rows))
+    else:
+        ncol = len(comps_to_plot)
+
+    effective_legend_loc = legend_loc if legend_loc is not None else "lower right"
     effective_legend_y = legend_y if legend_y is not None else 1.005
+    effective_legend_x = legend_x if legend_x is not None else (1.0 if "right" in effective_legend_loc else 0.0)
+    col_spacing = legend_columnspacing if legend_columnspacing is not None else 1.2
+
+    handles, leg_labels = ax.get_legend_handles_labels()
+    handles, leg_labels = reorder_legend_left_to_right(handles, leg_labels, ncols=ncol)
+
     ax.legend(
-        loc="lower center",
-        bbox_to_anchor=(0.5, effective_legend_y),
+        handles,
+        leg_labels,
+        loc=effective_legend_loc,
+        bbox_to_anchor=(effective_legend_x, effective_legend_y),
         ncol=ncol,
         frameon=False,
-        fontsize=9.5,
-        columnspacing=1.2,
+        fontsize=eff_legend,
+        columnspacing=col_spacing,
         handlelength=1.2,
         handleheight=0.9,
-        borderaxespad=0.2,
+        borderaxespad=0.0,
     )
 
     if title:
-        fig.suptitle(title, fontsize=12.5, fontweight="bold", y=1.06)
+        fig.suptitle(title, fontsize=9.0, fontweight="bold", y=1.06)
 
     plt.tight_layout()
 
@@ -352,22 +456,43 @@ def plot_variance_vertical(
     group_spacing: float = 0.35,
     human_spacing: Optional[float] = None,
     legend_y: Optional[float] = None,
+    legend_x: Optional[float] = None,
+    legend_loc: Optional[str] = None,
+    legend_rows: int = 2,
+    legend_ncol: Optional[int] = None,
+    legend_columnspacing: Optional[float] = None,
+    component_spacing: float = 0.8,
     show_labels: bool = True,
+    show_group_lines: bool = True,
     label_threshold: float = 4.5,
+    fontsize_labels: float = 9.0,
+    fontsize_percentages: float = 9.0,
+    fontsize_axis_label: Optional[float] = None,
+    fontsize_ticks: Optional[float] = None,
+    fontsize_legend: Optional[float] = None,
+    tilt_x: bool = False,
+    x_rotation: Optional[float] = None,
+    tilt_y: bool = False,
+    y_rotation: Optional[float] = None,
     title: Optional[str] = None,
     dpi: int = 300,
     show: bool = True,
 ) -> plt.Figure:
     """Create a vertical stacked bar chart of the variance decomposition."""
     plt.rcParams.update({
+        "font.family": "sans-serif",
         "font.sans-serif": ["DejaVu Sans", "Helvetica", "Arial"],
+        "font.size": 9.0,
         "axes.edgecolor": "#333333",
         "axes.linewidth": 0.8,
     })
 
     comps_to_plot = components if components is not None else COMPONENTS
+    eff_axis_label = fontsize_axis_label if fontsize_axis_label is not None else fontsize_labels
+    eff_ticks = fontsize_ticks if fontsize_ticks is not None else fontsize_labels
+    eff_legend = fontsize_legend if fontsize_legend is not None else 9.0
 
-    x_pos, separator_pos = compute_positions(
+    x_pos, separator_pos, group_separators = compute_positions(
         groups=groups,
         bar_size=bar_size,
         bar_spacing=bar_spacing,
@@ -390,8 +515,8 @@ def plot_variance_vertical(
             bottom=cum_bottom,
             width=bar_size,
             color=color,
-            edgecolor="white",
-            linewidth=0.8,
+            edgecolor="white" if component_spacing > 0 else "none",
+            linewidth=component_spacing,
             label=name,
         )
 
@@ -400,7 +525,7 @@ def plot_variance_vertical(
                 if val >= label_threshold:
                     x_center = rect.get_x() + rect.get_width() / 2.0
                     y_center = cum_bottom[i] + val / 2.0
-                    val_str = f"{val:.1f}%" if val < 10 else f"{val:.0f}%"
+                    val_str = f"{val:.0f}%" if val < 10 else f"{val:.0f}%"
                     ax.text(
                         x_center,
                         y_center,
@@ -408,27 +533,34 @@ def plot_variance_vertical(
                         ha="center",
                         va="center",
                         color="white",
-                        fontsize=8.0,
+                        fontsize=fontsize_percentages,
                         fontweight="bold",
                     )
 
         cum_bottom += vals
 
     # Format x-axis
+    rot = x_rotation if x_rotation is not None else (45 if tilt_x else 35)
     ax.set_xticks(x_pos)
-    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=10)
+    ax.set_xticklabels(labels, rotation=rot, ha="right", fontsize=fontsize_labels, fontweight="bold")
+    ax.tick_params(axis="x", labelsize=fontsize_labels)
     ax.set_xlim(x_pos[0] - bar_size * 0.8, x_pos[-1] + bar_size * 0.8)
 
-    # Visual separator line between Human Listeners and model representations
-    if len(labels) > 1 and "human" in groups:
-        ax.axvline(separator_pos, color="#777777", linestyle="--", linewidth=1.0, alpha=0.7)
+    # Visual separator dashed lines between groups (Human, STFT, Wavelet, Neural)
+    if show_group_lines:
+        for sep in group_separators:
+            ax.axvline(sep, color="#777777", linestyle="--", linewidth=1.0, alpha=0.7)
 
     # Format y-axis
     ax.set_ylim(0, 100)
     ax.yaxis.set_major_locator(mticker.MultipleLocator(20))
     ax.yaxis.set_minor_locator(mticker.MultipleLocator(10))
     ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=100, decimals=0))
-    ax.set_ylabel("Explained Variance (%)", fontsize=11, fontweight="bold", labelpad=8)
+    ax.set_ylabel("Explained Variance (%)", fontsize=eff_axis_label, fontweight="bold", labelpad=8)
+    ax.tick_params(axis="y", labelsize=eff_ticks)
+    if tilt_y or y_rotation is not None:
+        y_rot = y_rotation if y_rotation is not None else 45
+        plt.setp(ax.get_yticklabels(), rotation=y_rot, ha="right", va="center")
     ax.grid(axis="y", linestyle=":", color="#cccccc", alpha=0.7)
     ax.set_axisbelow(True)
 
@@ -436,23 +568,38 @@ def plot_variance_vertical(
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    # Legend at the top dynamically scaled to number of components
-    ncol = len(comps_to_plot)
+    # Legend at the top split across lines (default: right-aligned up to 100% tick marker)
+    if legend_ncol is not None:
+        ncol = legend_ncol
+    elif legend_rows is not None and legend_rows > 0:
+        ncol = int(np.ceil(len(comps_to_plot) / legend_rows))
+    else:
+        ncol = len(comps_to_plot)
+
+    effective_legend_loc = legend_loc if legend_loc is not None else "lower right"
     effective_legend_y = legend_y if legend_y is not None else 1.01
+    effective_legend_x = legend_x if legend_x is not None else (1.0 if "right" in effective_legend_loc else 0.0)
+    col_spacing = legend_columnspacing if legend_columnspacing is not None else 1.2
+
+    handles, leg_labels = ax.get_legend_handles_labels()
+    handles, leg_labels = reorder_legend_left_to_right(handles, leg_labels, ncols=ncol)
+
     ax.legend(
-        loc="lower center",
-        bbox_to_anchor=(0.5, effective_legend_y),
+        handles,
+        leg_labels,
+        loc=effective_legend_loc,
+        bbox_to_anchor=(effective_legend_x, effective_legend_y),
         ncol=ncol,
         frameon=False,
-        fontsize=9.5,
-        columnspacing=1.2,
+        fontsize=eff_legend,
+        columnspacing=col_spacing,
         handlelength=1.2,
         handleheight=0.9,
-        borderaxespad=0.25,
+        borderaxespad=0.0,
     )
 
     if title:
-        fig.suptitle(title, fontsize=12.5, fontweight="bold", y=1.06)
+        fig.suptitle(title, fontsize=9.0, fontweight="bold", y=1.06)
 
     plt.tight_layout()
 
@@ -526,11 +673,11 @@ def main():
         "-o",
         "--output",
         default=None,
-        help="Path to save figure image. If omitted, defaults to out/figure_variance.png or derives name from input TSV. Supports .png, .pdf, .svg, etc.",
+        help="Path to save figure image. If omitted, defaults to out/figure_variance.pdf or derives name from input TSV. Supports .png, .pdf, .svg, etc.",
     )
     parser.add_argument(
         "--distance-label",
-        default="Distance",
+        default="Modulation Amount",
         help="Display label for the rating_stimulus / distance variance component (default: Distance; e.g. 'Amount').",
     )
     parser.add_argument(
@@ -568,7 +715,7 @@ def main():
     parser.add_argument(
         "--group-spacing",
         type=float,
-        default=0.1,
+        default=0.2,
         dest="group_spacing",
         help="Additional whitespace gap between loss function groups (default: 0.2).",
     )
@@ -587,7 +734,7 @@ def main():
         "--bottom-pad",
         "--bottom-margin",
         type=float,
-        default=0.2,
+        default=0.05,
         dest="bottom_spacing",
         help="Whitespace padding between the lowest bar and the x-axis in horizontal mode (default: 0.55, where 0.5 is the bar boundary).",
     )
@@ -596,16 +743,53 @@ def main():
         "--legend-gap",
         "--legend-y",
         type=float,
-        default=None,
+        default=1.0,
         dest="legend_y",
         help="Vertical position/offset of legend above the graph (default: 1.005 for horizontal, 1.01 for vertical).",
+    )
+    parser.add_argument(
+        "--legend-loc",
+        default="lower right",
+        dest="legend_loc",
+        help="Legend placement anchor location (default: 'lower right').",
+    )
+    parser.add_argument(
+        "--legend-x",
+        type=float,
+        default=None,
+        dest="legend_x",
+        help="Horizontal position/offset of legend (default: 1.0 to right-align up to 100%% tick marker).",
+    )
+    parser.add_argument(
+        "--legend-columnspacing",
+        "--legend-col-spacing",
+        type=float,
+        default=None,
+        dest="legend_columnspacing",
+        help="Spacing between columns in the legend (default: 1.2).",
+    )
+    parser.add_argument(
+        "--component-spacing",
+        "--comp-spacing",
+        "--segment-spacing",
+        "--component-border",
+        "--component-width",
+        type=float,
+        default=2,
+        dest="component_spacing",
+        help="Width of the white separator line between adjacent components of the same bar (default: 0.8).",
+    )
+    parser.add_argument(
+        "--no-group-lines",
+        action="store_true",
+        help="Do not draw dashed separator lines between groups (human, stft, wavelet, neural).",
     )
     parser.add_argument(
         "--bar-size",
         "--bar-thickness",
         "--bar-width",
         type=float,
-        default=0.65,
+        default=1.0,
         dest="bar_size",
         help="Thickness of individual bars (default: 0.65).",
     )
@@ -617,8 +801,113 @@ def main():
     parser.add_argument(
         "--threshold",
         type=float,
-        default=4.5,
+        default=5.5,
         help="Minimum percentage required to render label inside a bar segment (default: 4.5).",
+    )
+    font_size = 16
+    parser.add_argument(
+        "--fontsize-labels",
+        "--font-size-labels",
+        "--labels-fontsize",
+        "--fontsize-label",
+        "--font-size-label",
+        type=float,
+        default=font_size,
+        dest="fontsize_labels",
+        help="Font size for entity/method labels (default: 9.0).",
+    )
+    parser.add_argument(
+        "--fontsize-percentages",
+        "--font-size-percentages",
+        "--percentages-fontsize",
+        "--fontsize-pct",
+        "--font-size-pct",
+        "--pct-fontsize",
+        type=float,
+        default=font_size - 4,
+        dest="fontsize_percentages",
+        help="Font size for percentage text inside bar segments (default: 9.0).",
+    )
+    parser.add_argument(
+        "--fontsize-axis-label",
+        "--font-size-axis-label",
+        "--axis-label-fontsize",
+        type=float,
+        default=None,
+        dest="fontsize_axis_label",
+        help="Optional override for 'Explained Variance (%%)' axis label font size (default: same as --fontsize-labels).",
+    )
+    parser.add_argument(
+        "--fontsize-ticks",
+        "--font-size-ticks",
+        "--tick-fontsize",
+        "--ticks-fontsize",
+        type=float,
+        default=font_size - 4,
+        dest="fontsize_ticks",
+        help="Optional override for numeric tick values font size (default: same as --fontsize-labels).",
+    )
+    parser.add_argument(
+        "--fontsize-legend",
+        "--font-size-legend",
+        "--legend-fontsize",
+        type=float,
+        default=font_size - 3,
+        dest="fontsize_legend",
+        help="Optional override for legend font size (default: 9.0).",
+    )
+    parser.add_argument(
+        "--legend-rows",
+        type=int,
+        # default=2,
+        default=1,
+        dest="legend_rows",
+        help="Number of lines/rows to split the legend across (default: 2).",
+    )
+    parser.add_argument(
+        "--legend-cols",
+        "--legend-ncol",
+        type=int,
+        default=None,
+        dest="legend_cols",
+        help="Number of columns for the legend (overrides --legend-rows).",
+    )
+    parser.add_argument(
+        "--tilt-x",
+        "--tilt-x-labels",
+        "--tilt-x-45",
+        "--tilt-45",
+        "--rotate-x",
+        action="store_true",
+        dest="tilt_x",
+        help="Tilt x-axis labels at 45 degrees.",
+    )
+    parser.add_argument(
+        "--x-rotation",
+        "--x-rot",
+        type=float,
+        default=None,
+        dest="x_rotation",
+        help="Custom rotation angle for x-axis labels in degrees (default: 45 if --tilt-x, else 35 for vertical / 0 for horizontal).",
+    )
+    parser.add_argument(
+        "--tilt-y",
+        "--tilt-y-labels",
+        "--tilt-y-45",
+        "--tilt-45-y",
+        "--rotate-y",
+        action="store_true",
+        # default=True,
+        dest="tilt_y",
+        help="Tilt y-axis labels at 45 degrees.",
+    )
+    parser.add_argument(
+        "--y-rotation",
+        "--y-rot",
+        type=float,
+        default=None,
+        dest="y_rotation",
+        help="Custom rotation angle for y-axis labels in degrees (default: 45 if --tilt-y, else 0).",
     )
     parser.add_argument(
         "--dpi",
@@ -689,8 +978,24 @@ def main():
             human_spacing=args.human_spacing,
             bottom_spacing=args.bottom_spacing,
             legend_y=legend_y,
+            legend_x=args.legend_x,
+            legend_loc=args.legend_loc,
+            legend_rows=args.legend_rows,
+            legend_ncol=args.legend_cols,
+            legend_columnspacing=args.legend_columnspacing,
+            component_spacing=args.component_spacing,
             show_labels=not args.no_labels,
+            show_group_lines=not args.no_group_lines,
             label_threshold=args.threshold,
+            fontsize_labels=args.fontsize_labels,
+            fontsize_percentages=args.fontsize_percentages,
+            fontsize_axis_label=args.fontsize_axis_label,
+            fontsize_ticks=args.fontsize_ticks,
+            fontsize_legend=args.fontsize_legend,
+            tilt_x=args.tilt_x,
+            x_rotation=args.x_rotation,
+            tilt_y=args.tilt_y,
+            y_rotation=args.y_rotation,
             title=args.title,
             dpi=args.dpi,
             show=should_show,
@@ -707,8 +1012,24 @@ def main():
             group_spacing=args.group_spacing,
             human_spacing=args.human_spacing,
             legend_y=legend_y,
+            legend_x=args.legend_x,
+            legend_loc=args.legend_loc,
+            legend_rows=args.legend_rows,
+            legend_ncol=args.legend_cols,
+            legend_columnspacing=args.legend_columnspacing,
+            component_spacing=args.component_spacing,
             show_labels=not args.no_labels,
+            show_group_lines=not args.no_group_lines,
             label_threshold=args.threshold,
+            fontsize_labels=args.fontsize_labels,
+            fontsize_percentages=args.fontsize_percentages,
+            fontsize_axis_label=args.fontsize_axis_label,
+            fontsize_ticks=args.fontsize_ticks,
+            fontsize_legend=args.fontsize_legend,
+            tilt_x=args.tilt_x,
+            x_rotation=args.x_rotation,
+            tilt_y=args.tilt_y,
+            y_rotation=args.y_rotation,
             title=args.title,
             dpi=args.dpi,
             show=should_show,

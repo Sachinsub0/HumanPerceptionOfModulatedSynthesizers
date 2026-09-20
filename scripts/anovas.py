@@ -382,6 +382,7 @@ def compute_pairwise_posthocs(
     Equivalent to R:
         pairwise_t_test(mean_rating ~ modulation, paired = TRUE, p.adjust.method = "bonferroni")
         pairwise_t_test(mean_rating ~ feature, paired = TRUE, p.adjust.method = "bonferroni")
+        pairwise_t_test(mean_rating ~ rating_stimulus, paired = TRUE, p.adjust.method = "bonferroni")
     """
     log.info("Computing pairwise post-hoc tests (Bonferroni adjusted)...")
     in_col = _resolve_input_col(df, dv, input_col)
@@ -418,10 +419,45 @@ def compute_pairwise_posthocs(
         padjust="bonf",
     )
 
-    return {
+    # 3. Amount (four amounts / rating_stimulus) pairwise comparisons
+    amount_col = (
+        "rating_stimulus"
+        if "rating_stimulus" in df.columns
+        else ("amount" if "amount" in df.columns else None)
+    )
+    pw_amount = None
+    if amount_col is not None:
+        df_amount = (
+            df[df[amount_col] != "reference"].copy()
+            if "reference" in df[amount_col].values
+            else df
+        )
+        amount_means = (
+            df_amount.groupby([subject, amount_col], as_index=False)[in_col]
+            .mean()
+            .rename(columns={in_col: dv})
+        )
+        amount_means_comp = _filter_balanced_subjects(
+            amount_means, subject, [amount_col], dv
+        )
+
+        pw_amount = pg.pairwise_tests(
+            data=amount_means_comp,
+            dv=dv,
+            within=amount_col,
+            subject=subject,
+            padjust="bonf",
+        )
+
+    results = {
         "modulation": pw_modulation,
         "feature": pw_feature,
     }
+    if pw_amount is not None:
+        results["amount"] = pw_amount
+        results["rating_stimulus"] = pw_amount
+
+    return results
 
 
 def compute_normality_tests(
@@ -568,6 +604,9 @@ def run_all_anovas(
     log.info(posthocs["modulation"].to_string(index=False))
     log.info("\n[Post-hoc: Feature]")
     log.info(posthocs["feature"].to_string(index=False))
+    if "amount" in posthocs:
+        log.info("\n[Post-hoc: Amount (4 conditions)]")
+        log.info(posthocs["amount"].to_string(index=False))
 
 
 if __name__ == "__main__":

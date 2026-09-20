@@ -42,6 +42,13 @@ Fit & Error Bar options:
   - --error-style bars (default): plot vertical error bars with caps.
   - --error-style both: plot both shaded region and vertical error bars.
   - --shade-range: also shade the [min, max] range with a lighter color.
+
+Typography & Font Size options:
+- --fontsize-xlabel: font size for the x-axis label (default: 9.0).
+- --fontsize-ylabel: font size for the y-axis labels (default: 9.0).
+- --fontsize-r2: font size for R^2 value annotations (default: 9.0).
+- --fontsize-ticks: font size for tick values (default: 9.0).
+- --fontsize-xticks / --fontsize-yticks: optional individual overrides for tick values.
 """
 
 from __future__ import annotations
@@ -61,7 +68,7 @@ from scipy.stats import linregress
 # Canonical individual loss functions
 INDIVIDUAL_LOSS_FUNCTIONS = [
     # STFT Group
-    ("mss_log_lin", "MSS Log + Linear", "STFT"),
+    ("mss_log_lin", "MSS Log + Lin.", "STFT"),
     ("mss_rev", "MSS Revisited", "STFT"),
     ("mfcc", "MFCC", "STFT"),
     # Wavelet Group
@@ -369,6 +376,13 @@ def plot_loss_linear_fits(
     line_color: str = "#2a78d6",
     marker_color: str = "#111111",
     r2_decimals: int = 2,
+    fontsize_xlabel: float = 9.0,
+    fontsize_ylabel: float = 9.0,
+    fontsize_r2: float = 9.0,
+    fontsize_ticks: float = 9.0,
+    fontsize_xticks: Optional[float] = None,
+    fontsize_yticks: Optional[float] = None,
+    fontsize_title: float = 9.0,
     dpi: int = 300,
     show: bool = True,
 ) -> plt.Figure:
@@ -383,10 +397,15 @@ def plot_loss_linear_fits(
     row_items = prepare_plot_items(plot_mode, df_plot, loss_fns=loss_fns_clean)
 
     plt.rcParams.update({
+        "font.family": "sans-serif",
         "font.sans-serif": ["DejaVu Sans", "Helvetica", "Arial"],
+        "font.size": 9.0,
         "axes.edgecolor": "#333333",
-        "axes.linewidth": 0.85,
+        "axes.linewidth": 0.8,
     })
+
+    eff_xticks = fontsize_xticks if fontsize_xticks is not None else fontsize_ticks
+    eff_yticks = fontsize_yticks if fontsize_yticks is not None else fontsize_ticks
 
     n_rows = len(row_items)
     n_cols = len(MODULATION_COLUMNS)
@@ -557,7 +576,7 @@ def plot_loss_linear_fits(
                     r2_str,
                     transform=ax.transAxes,
                     color=line_color,
-                    fontsize=10.5,
+                    fontsize=fontsize_r2,
                     fontweight="bold",
                     va="top",
                     ha="left",
@@ -622,19 +641,20 @@ def plot_loss_linear_fits(
 
             # Column titles: only on the very top row (r_idx == 0)
             if r_idx == 0:
-                ax.set_title(col["title"], fontsize=11.5, fontweight="bold", pad=6)
+                ax.set_title(col["title"], fontsize=fontsize_title, fontweight="bold", pad=6)
 
             # X-ticks: set explicitly on ALL rows so vertical gridlines are drawn at every point
             ax.set_xticks(x_indices)
             if r_idx == n_rows - 1:
-                ax.set_xticklabels(col["tick_labels"], fontsize=9)
+                ax.set_xticklabels(col["tick_labels"], fontsize=eff_xticks)
+                ax.tick_params(axis="x", labelsize=eff_xticks)
             else:
                 ax.tick_params(labelbottom=False, bottom=False)
 
             # Y-axis label and ticks: only on the leftmost column (c_idx == 0)
             if c_idx == 0:
-                ax.set_ylabel(row_label, fontsize=10, fontweight="bold", labelpad=5)
-                ax.tick_params(labelsize=8.5)
+                ax.set_ylabel(row_label, fontsize=fontsize_ylabel, fontweight="bold", labelpad=5)
+                ax.tick_params(axis="y", labelsize=eff_yticks)
             else:
                 ax.tick_params(labelleft=False, left=False)
 
@@ -659,7 +679,7 @@ def plot_loss_linear_fits(
             )
 
     # Common X-axis label centered at the bottom
-    axes[n_rows - 1, 1].set_xlabel("Modulation amount", fontsize=11.5, fontweight="bold", labelpad=5)
+    axes[n_rows - 1, 1].set_xlabel("Modulation amount", fontsize=fontsize_xlabel, fontweight="bold", labelpad=5)
 
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -722,8 +742,8 @@ def main():
         "--human",
         nargs="?",
         const="data/listening_test_responses_postprocessed.tsv",
-        default="data/listening_test_responses_postprocessed.tsv",
-        # default=None,
+        # default="data/listening_test_responses_postprocessed.tsv",
+        default=None,
         dest="human_data",
         help="Optional path to postprocessed human listening responses TSV (default when flag used without argument: data/listening_test_responses_postprocessed.tsv). When provided, human ratings are graphed as the first row.",
     )
@@ -744,9 +764,9 @@ def main():
         "--loss-fns",
         "-l",
         nargs="+",
-        default=None,
+        # default=None,
         # default=["mss_log_lin", "mss_rev", "mfcc", "scat1d_log1p", "jtfs_log1p"],
-        # default=["vggish", "encodec48k", "clap2", "panns_wavegram_logmel"],
+        default=["vggish", "encodec48k", "clap2", "panns_wavegram_logmel"],
         help="Filter analysis to specific loss function(s) (e.g. -l mfcc mss_log_lin)",
     )
     parser.add_argument(
@@ -881,6 +901,74 @@ def main():
         default="#111111",
         help="Color of markers and error bars (default: #111111).",
     )
+    font_size = 16.0
+    parser.add_argument(
+        "--fontsize-xlabel",
+        "--font-size-xlabel",
+        "--xlabel-fontsize",
+        "--fontsize-x",
+        type=float,
+        default=font_size,
+        dest="fontsize_xlabel",
+        help="Font size for x-axis label (default: 9.0).",
+    )
+    parser.add_argument(
+        "--fontsize-ylabel",
+        "--font-size-ylabel",
+        "--ylabel-fontsize",
+        "--fontsize-y",
+        type=float,
+        default=font_size,
+        dest="fontsize_ylabel",
+        help="Font size for y-axis labels (default: 9.0).",
+    )
+    parser.add_argument(
+        "--fontsize-r2",
+        "--font-size-r2",
+        "--r2-fontsize",
+        type=float,
+        default=font_size,
+        dest="fontsize_r2",
+        help="Font size for R^2 value annotation (default: 9.0).",
+    )
+    parser.add_argument(
+        "--fontsize-ticks",
+        "--font-size-ticks",
+        "--tick-fontsize",
+        "--fontsize-tick",
+        "--ticks-fontsize",
+        type=float,
+        default=font_size - 4,
+        dest="fontsize_ticks",
+        help="Font size for tick values (default: 9.0).",
+    )
+    parser.add_argument(
+        "--fontsize-xticks",
+        "--font-size-xticks",
+        "--xticks-fontsize",
+        type=float,
+        default=None,
+        dest="fontsize_xticks",
+        help="Optional override for x-axis tick values font size (default: same as --fontsize-ticks).",
+    )
+    parser.add_argument(
+        "--fontsize-yticks",
+        "--font-size-yticks",
+        "--yticks-fontsize",
+        type=float,
+        default=None,
+        dest="fontsize_yticks",
+        help="Optional override for y-axis tick values font size (default: same as --fontsize-ticks).",
+    )
+    parser.add_argument(
+        "--fontsize-title",
+        "--font-size-title",
+        "--title-fontsize",
+        type=float,
+        default=font_size,
+        dest="fontsize_title",
+        help="Font size for column titles (default: 9.0).",
+    )
     parser.add_argument(
         "--dpi",
         type=int,
@@ -935,6 +1023,13 @@ def main():
         line_color=args.line_color,
         marker_color=args.marker_color,
         r2_decimals=args.r2_decimals,
+        fontsize_xlabel=args.fontsize_xlabel,
+        fontsize_ylabel=args.fontsize_ylabel,
+        fontsize_r2=args.fontsize_r2,
+        fontsize_ticks=args.fontsize_ticks,
+        fontsize_xticks=args.fontsize_xticks,
+        fontsize_yticks=args.fontsize_yticks,
+        fontsize_title=args.fontsize_title,
         dpi=args.dpi,
         show=not args.no_show,
     )
