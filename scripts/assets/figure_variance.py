@@ -46,16 +46,16 @@ import pandas as pd
 
 # Method ordering matching correlation and ANOVA tables
 ENTITIES = [
-    ("human", "Human\nListeners", "human"),
-    ("mss_log_lin", "MSS Log\n+ Linear", "group1"),
+    ("human", "Human", "human"),
+    ("mss_log_lin", "MSS L+L", "group1"),
     ("mss_rev", "MSS Rev.", "group1"),
     ("mfcc", "MFCC", "group1"),
     ("scat1d_log1p", "Scat1D", "group2"),
     ("jtfs_log1p", "JTFS", "group2"),
     ("vggish", "VGGish", "group3"),
-    ("encodec48k", "EnCodec\n48 kHz", "group3"),
+    ("encodec48k", "EnCodec", "group3"),
     ("clap2", "MS-CLAP", "group3"),
-    ("panns_wavegram_logmel", "PANNs\nWGLM", "group3"),
+    ("panns_wavegram_logmel", "PANNs", "group3"),
 ]
 
 LOSS_FN_ALIASES = {
@@ -789,7 +789,7 @@ def main():
         "--bar-thickness",
         "--bar-width",
         type=float,
-        default=1.0,
+        default=0.7,
         dest="bar_size",
         help="Thickness of individual bars (default: 0.65).",
     )

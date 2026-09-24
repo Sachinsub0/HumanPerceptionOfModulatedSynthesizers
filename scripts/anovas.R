@@ -3,7 +3,7 @@ library(dplyr)
 library(rstatix)
 
 # Load the dataframe exported from Python
-dat <- read_tsv("out/4_way_data.tsv")
+dat <- read_tsv("anova_4way_unpooled_balanced_data.tsv")
 
 # Make sure categorical variables are factors
 dat <- dat |>
